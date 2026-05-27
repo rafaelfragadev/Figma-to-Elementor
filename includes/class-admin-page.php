@@ -303,38 +303,77 @@ final class Admin_Page
 
     private function render_step_done(): void
     {
-        $session = $this->get_session();
-        $page_id = (int) ($session['page_id'] ?? 0);
+        $session    = $this->get_session();
+        $page_id    = (int) ($session['page_id'] ?? 0);
+        $frame_name = esc_html($session['frame_name'] ?? '');
 
-        // Elementor editor URL: action=elementor (not action=edit which opens the block editor)
-        $elementor_url = $page_id > 0
+        // Build every URL explicitly so there is no ambiguity.
+        $elementor_edit_url = $page_id > 0
             ? admin_url('post.php?post=' . $page_id . '&action=elementor')
             : '';
-        $preview_url   = $page_id > 0 ? get_permalink($page_id) : '';
+        $wp_edit_url  = $page_id > 0 ? get_edit_post_link($page_id, 'display') : '';
+        $preview_url  = $page_id > 0 ? (string) get_permalink($page_id) : '';
+        $pages_url    = admin_url('edit.php?post_type=page');
+        $new_url      = admin_url('admin.php?page=' . self::SLUG . '&step=connect');
+        $sections_url = admin_url('admin.php?page=' . self::SLUG . '&step=sections');
         ?>
         <div class="ftea-card">
-            <h2><?php esc_html_e('Import Complete', 'ftea'); ?></h2>
+            <h2>✅ <?php esc_html_e('Import Complete', 'ftea'); ?></h2>
 
             <?php if ($page_id > 0) : ?>
-                <p><?php esc_html_e('All sections imported. Your page is ready.', 'ftea'); ?></p>
                 <p>
-                    <a href="<?php echo esc_url($elementor_url); ?>" class="button button-primary">
-                        <?php esc_html_e('Open in Elementor', 'ftea'); ?>
-                    </a>
-                    <?php if ($preview_url) : ?>
-                        <a href="<?php echo esc_url($preview_url); ?>" class="button" target="_blank">
-                            <?php esc_html_e('Preview Page', 'ftea'); ?>
-                        </a>
-                    <?php endif; ?>
+                    <?php
+                    printf(
+                        esc_html__('Page "%s" created successfully (ID: %d).', 'ftea'),
+                        '<strong>' . $frame_name . '</strong>',
+                        $page_id
+                    );
+                    ?>
                 </p>
+
+                <table class="ftea-done-table">
+                    <tr>
+                        <th><?php esc_html_e('Open Elementor editor', 'ftea'); ?></th>
+                        <td><a href="<?php echo esc_url($elementor_edit_url); ?>" class="button button-primary"><?php esc_html_e('Open in Elementor', 'ftea'); ?></a></td>
+                    </tr>
+                    <?php if ($preview_url) : ?>
+                    <tr>
+                        <th><?php esc_html_e('Preview page', 'ftea'); ?></th>
+                        <td><a href="<?php echo esc_url($preview_url); ?>" class="button" target="_blank"><?php esc_html_e('Preview', 'ftea'); ?></a></td>
+                    </tr>
+                    <?php endif; ?>
+                    <?php if ($wp_edit_url) : ?>
+                    <tr>
+                        <th><?php esc_html_e('WordPress editor (fallback)', 'ftea'); ?></th>
+                        <td><a href="<?php echo esc_url($wp_edit_url); ?>" class="button"><?php esc_html_e('Edit Page (WP)', 'ftea'); ?></a></td>
+                    </tr>
+                    <?php endif; ?>
+                    <tr>
+                        <th><?php esc_html_e('All pages', 'ftea'); ?></th>
+                        <td><a href="<?php echo esc_url($pages_url); ?>" class="button"><?php esc_html_e('Pages list', 'ftea'); ?></a></td>
+                    </tr>
+                </table>
+
             <?php else : ?>
-                <p><?php esc_html_e('Import finished but the page ID was not found in the session. Check the Pages list in WordPress.', 'ftea'); ?></p>
+                <div class="notice notice-warning inline">
+                    <p><?php esc_html_e('Import finished but no page ID was recorded. The page may still exist — check the Pages list.', 'ftea'); ?></p>
+                </div>
+                <p><a href="<?php echo esc_url($pages_url); ?>" class="button button-primary"><?php esc_html_e('Go to Pages', 'ftea'); ?></a></p>
             <?php endif; ?>
 
-            <!-- step=connect forces session reset in render() before loading the form -->
-            <a href="<?php echo esc_url(admin_url('admin.php?page=' . self::SLUG . '&step=connect')); ?>" class="button">
-                <?php esc_html_e('Start New Import', 'ftea'); ?>
-            </a>
+            <hr style="margin:20px 0;">
+
+            <p>
+                <?php if ($page_id > 0) : ?>
+                    <a href="<?php echo esc_url($sections_url); ?>" class="button">
+                        <?php esc_html_e('← Back to sections', 'ftea'); ?>
+                    </a>
+                <?php endif; ?>
+                <!-- ?step=connect clears the session before loading the connect form -->
+                <a href="<?php echo esc_url($new_url); ?>" class="button">
+                    <?php esc_html_e('Start New Import', 'ftea'); ?>
+                </a>
+            </p>
         </div>
         <?php
     }

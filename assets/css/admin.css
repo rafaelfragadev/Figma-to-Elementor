@@ -81,6 +81,14 @@
     color: #842029;
 }
 
+/* ---- Done table ---- */
+.ftea-done-table { border-collapse: collapse; margin-top: 12px; }
+.ftea-done-table th,
+.ftea-done-table td { padding: 8px 16px 8px 0; vertical-align: middle; }
+.ftea-done-table th { color: #666; font-weight: 400; white-space: nowrap; }
+.ftea-done-table tr + tr th,
+.ftea-done-table tr + tr td { border-top: 1px solid #f0f0f1; }
+
 /* ---- Utility ---- */
 .ftea-wrap .button + .button { margin-left: 6px; }
 .ftea-wrap code {
