@@ -51,6 +51,12 @@ final class Admin_Page
 
     public function render(): void
     {
+        // Navigating to ?step=connect explicitly resets the session so the
+        // user truly starts over instead of seeing the stale 'done' screen.
+        if (isset($_GET['step']) && $_GET['step'] === 'connect') {
+            $this->clear_session();
+        }
+
         $step = $this->get_step();
         ?>
         <div class="wrap ftea-wrap">
@@ -299,6 +305,12 @@ final class Admin_Page
     {
         $session = $this->get_session();
         $page_id = (int) ($session['page_id'] ?? 0);
+
+        // Elementor editor URL: action=elementor (not action=edit which opens the block editor)
+        $elementor_url = $page_id > 0
+            ? admin_url('post.php?post=' . $page_id . '&action=elementor')
+            : '';
+        $preview_url   = $page_id > 0 ? get_permalink($page_id) : '';
         ?>
         <div class="ftea-card">
             <h2><?php esc_html_e('Import Complete', 'ftea'); ?></h2>
@@ -306,18 +318,21 @@ final class Admin_Page
             <?php if ($page_id > 0) : ?>
                 <p><?php esc_html_e('All sections imported. Your page is ready.', 'ftea'); ?></p>
                 <p>
-                    <a href="<?php echo esc_url(get_edit_post_link($page_id)); ?>" class="button button-primary" target="_blank">
+                    <a href="<?php echo esc_url($elementor_url); ?>" class="button button-primary">
                         <?php esc_html_e('Open in Elementor', 'ftea'); ?>
                     </a>
-                    <?php if (get_permalink($page_id)) : ?>
-                        <a href="<?php echo esc_url(get_permalink($page_id)); ?>" class="button" target="_blank">
+                    <?php if ($preview_url) : ?>
+                        <a href="<?php echo esc_url($preview_url); ?>" class="button" target="_blank">
                             <?php esc_html_e('Preview Page', 'ftea'); ?>
                         </a>
                     <?php endif; ?>
                 </p>
+            <?php else : ?>
+                <p><?php esc_html_e('Import finished but the page ID was not found in the session. Check the Pages list in WordPress.', 'ftea'); ?></p>
             <?php endif; ?>
 
-            <a href="<?php echo esc_url(admin_url('admin.php?page=' . self::SLUG)); ?>" class="button">
+            <!-- step=connect forces session reset in render() before loading the form -->
+            <a href="<?php echo esc_url(admin_url('admin.php?page=' . self::SLUG . '&step=connect')); ?>" class="button">
                 <?php esc_html_e('Start New Import', 'ftea'); ?>
             </a>
         </div>
@@ -619,6 +634,11 @@ final class Admin_Page
     private function save_session(array $data): void
     {
         set_transient(self::SESSION_KEY . '_' . get_current_user_id(), $data, 3 * HOUR_IN_SECONDS);
+    }
+
+    private function clear_session(): void
+    {
+        delete_transient(self::SESSION_KEY . '_' . get_current_user_id());
     }
 
     private function get_step(): string
