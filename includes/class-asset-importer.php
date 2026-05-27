@@ -25,6 +25,13 @@ final class Asset_Importer
     /** @var array{found:int,downloaded:int,failed:int,svg:int,errors:string[]} */
     private array $stats = ['found' => 0, 'downloaded' => 0, 'failed' => 0, 'svg' => 0, 'errors' => []];
 
+    /**
+     * Per-asset resolution log: each entry has
+     * {id, node_type, format_tried, format_used, status, url}.
+     * "status" is one of: imported | fallback_png | failed
+     */
+    private array $asset_log = [];
+
     private ?Figma_API $api  = null;
     private string $file_key = '';
     private string $token    = '';
@@ -35,9 +42,11 @@ final class Asset_Importer
 
     public function init(Figma_API $api, string $file_key, string $token): void
     {
-        $this->api      = $api;
-        $this->file_key = $file_key;
-        $this->token    = $token;
+        $this->api       = $api;
+        $this->file_key  = $file_key;
+        $this->token     = $token;
+        $this->asset_log = [];
+        $this->stats     = ['found' => 0, 'downloaded' => 0, 'failed' => 0, 'svg' => 0, 'errors' => []];
     }
 
     /**
@@ -57,6 +66,11 @@ final class Asset_Importer
     /**
      * Export Figma nodes as raster or SVG and cache the results.
      *
+     * FALLBACK CHAIN for SVG nodes:
+     *   1. Request SVG URL from Figma → fetch inline SVG markup.
+     *   2. If Figma returns no URL, or inline fetch fails → request PNG@2× and
+     *      sideload to media library (never leaves the node invisible).
+     *
      * @param string[] $node_ids  Raw Figma node IDs, e.g. ['1:2', '34:567']
      */
     public function prefetch(array $node_ids, string $format = 'png'): void
@@ -74,13 +88,19 @@ final class Asset_Importer
 
         $response = $this->api->get_image_urls($this->file_key, $this->token, $pending, $format);
         if (is_wp_error($response)) {
-            $msg = 'Figma export API error: ' . $response->get_error_message();
+            $msg = 'Figma export API error (' . $format . '): ' . $response->get_error_message();
             ftea_log($msg, ['ids' => $pending]);
             $this->stats['errors'][] = $msg;
-            // Mark all as failed so the builder can show a placeholder.
-            foreach ($pending as $id) {
-                $this->cache[$id] = ['id' => 0, 'url' => '', 'inline_svg' => ''];
-                $this->stats['failed']++;
+
+            // For SVG failures, try the whole batch as PNG before giving up.
+            if ('svg' === $format) {
+                $this->prefetch($pending, 'png');
+            } else {
+                foreach ($pending as $id) {
+                    $this->cache[$id] = ['id' => 0, 'url' => '', 'inline_svg' => ''];
+                    $this->stats['failed']++;
+                    $this->record_asset($id, $format, '', 'failed', '');
+                }
             }
             return;
         }
@@ -90,34 +110,101 @@ final class Asset_Importer
         foreach ($pending as $node_id) {
             $url = is_string($images[$node_id] ?? null) ? $images[$node_id] : '';
 
+            // ── No URL returned ────────────────────────────────────────────
             if ($url === '') {
-                // Figma returned null — node not exportable (e.g. hidden, locked).
-                $this->cache[$node_id] = ['id' => 0, 'url' => '', 'inline_svg' => ''];
-                $this->stats['failed']++;
-                ftea_log('No export URL for node', ['id' => $node_id]);
+                ftea_log('No export URL for node', ['id' => $node_id, 'format' => $format]);
+
+                if ('svg' === $format) {
+                    // Retry this single node as PNG before marking it failed.
+                    $this->fetch_single_as_png($node_id, 'svg_node');
+                } else {
+                    $this->cache[$node_id] = ['id' => 0, 'url' => '', 'inline_svg' => ''];
+                    $this->stats['failed']++;
+                    $this->record_asset($node_id, $format, $format, 'failed', '');
+                }
                 continue;
             }
 
-            if ($format === 'svg') {
+            // ── SVG path ───────────────────────────────────────────────────
+            if ('svg' === $format) {
                 $inline = $this->fetch_inline_svg($url);
                 if ($inline !== '') {
                     $this->cache[$node_id] = ['id' => 0, 'url' => $url, 'inline_svg' => $inline];
                     $this->stats['svg']++;
                     $this->stats['downloaded']++;
+                    $this->record_asset($node_id, 'svg', 'svg', 'imported', $url);
                     continue;
                 }
-                // If SVG fetch failed, fall through to PNG-style download.
+
+                // SVG inline fetch failed → fall back to PNG export.
+                ftea_log('SVG inline fetch failed, requesting PNG fallback', ['id' => $node_id]);
+                $this->fetch_single_as_png($node_id, 'svg_node');
+                continue;
             }
 
-            $saved = $this->download_to_media($url, $node_id, $format);
+            // ── PNG / raster path ──────────────────────────────────────────
+            $saved = $this->download_to_media($url, $node_id, 'png');
             $this->cache[$node_id] = $saved;
 
             if ($saved['id'] > 0 || $saved['url'] !== '') {
                 $this->stats['downloaded']++;
+                $this->record_asset($node_id, $format, 'png', 'imported', $saved['url']);
             } else {
                 $this->stats['failed']++;
+                $this->record_asset($node_id, $format, 'png', 'failed', '');
             }
         }
+    }
+
+    /**
+     * Request a single node as PNG@2× from Figma and store in cache.
+     * Used as the last-resort fallback for SVG nodes that cannot be fetched.
+     */
+    private function fetch_single_as_png(string $node_id, string $original_type): void
+    {
+        if (! $this->api) {
+            $this->cache[$node_id] = ['id' => 0, 'url' => '', 'inline_svg' => ''];
+            $this->stats['failed']++;
+            $this->record_asset($node_id, $original_type, 'png_fallback', 'failed', '');
+            return;
+        }
+
+        $png_resp = $this->api->get_image_urls($this->file_key, $this->token, [$node_id], 'png', 2.0);
+
+        if (is_wp_error($png_resp)) {
+            $msg = 'PNG fallback API error: ' . $png_resp->get_error_message();
+            ftea_log($msg, ['id' => $node_id]);
+            $this->stats['errors'][] = $msg;
+            $this->cache[$node_id]   = ['id' => 0, 'url' => '', 'inline_svg' => ''];
+            $this->stats['failed']++;
+            $this->record_asset($node_id, $original_type, 'png_fallback', 'failed', '');
+            return;
+        }
+
+        $png_url = is_string($png_resp['images'][$node_id] ?? null) ? $png_resp['images'][$node_id] : '';
+
+        if ($png_url === '') {
+            $this->cache[$node_id] = ['id' => 0, 'url' => '', 'inline_svg' => ''];
+            $this->stats['failed']++;
+            $this->record_asset($node_id, $original_type, 'png_fallback', 'failed', '');
+            return;
+        }
+
+        $saved = $this->download_to_media($png_url, $node_id, 'png');
+        $this->cache[$node_id] = $saved;
+
+        if ($saved['id'] > 0 || $saved['url'] !== '') {
+            $this->stats['downloaded']++;
+            $this->record_asset($node_id, $original_type, 'png_fallback', 'fallback_png', $saved['url']);
+        } else {
+            $this->stats['failed']++;
+            $this->record_asset($node_id, $original_type, 'png_fallback', 'failed', '');
+        }
+    }
+
+    private function record_asset(string $id, string $node_type, string $format_used, string $status, string $url): void
+    {
+        $this->asset_log[] = compact('id', 'node_type', 'format_used', 'status', 'url');
     }
 
     /**
@@ -200,6 +287,12 @@ final class Asset_Importer
     public function get_stats(): array
     {
         return $this->stats;
+    }
+
+    /** @return array<int, array{id:string,node_type:string,format_used:string,status:string,url:string}> */
+    public function get_asset_log(): array
+    {
+        return $this->asset_log;
     }
 
     /**

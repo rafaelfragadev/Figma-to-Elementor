@@ -187,23 +187,30 @@ final class Figma_Parser
         $line_height = isset($style['lineHeightPx']) ? (float) $style['lineHeightPx'] : null;
         $letter_sp   = isset($style['letterSpacing']) ? (float) $style['letterSpacing'] : null;
         $text_align  = as_str($style['textAlignHorizontal'] ?? '');
+        $text_case   = as_str($style['textCase'] ?? '');
+        $text_deco   = as_str($style['textDecoration'] ?? '');
         $is_heading  = $font_size !== null && ($font_size >= 24 || ($font_weight !== null && $font_weight >= 600));
         $text        = sanitize_textarea_field(as_str($node['characters'] ?? ''));
 
+        // Resolve the text color: node-level fills win; combine with node opacity.
+        $text_color = extract_text_color($node);
+
         return [
-            'type'           => $is_heading ? 'heading' : 'text',
-            'figma_id'       => as_str($node['id'] ?? ''),
-            'name'           => get_node_name($node),
-            'content'        => $text,
-            'font_size'      => $font_size,
-            'font_weight'    => $font_weight,
-            'line_height'    => $line_height,
-            'letter_spacing' => $letter_sp,
-            'text_align'     => $text_align,
-            'font_family'    => is_string($style['fontFamily'] ?? null) ? $style['fontFamily'] : null,
-            'text_color'     => extract_text_color($node),
-            'opacity'        => extract_opacity($node),
-            'layout'         => extract_auto_layout($node),
+            'type'            => $is_heading ? 'heading' : 'text',
+            'figma_id'        => as_str($node['id'] ?? ''),
+            'name'            => get_node_name($node),
+            'content'         => $text,
+            'font_size'       => $font_size,
+            'font_weight'     => $font_weight,
+            'line_height'     => $line_height,
+            'letter_spacing'  => $letter_sp,
+            'text_align'      => $text_align,
+            'text_case'       => $text_case,
+            'text_decoration' => $text_deco,
+            'font_family'     => is_string($style['fontFamily'] ?? null) ? $style['fontFamily'] : null,
+            'text_color'      => $text_color,
+            'opacity'         => extract_opacity($node),
+            'layout'          => extract_auto_layout($node),
         ];
     }
 

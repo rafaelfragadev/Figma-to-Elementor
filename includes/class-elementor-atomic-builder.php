@@ -55,14 +55,24 @@ final class Elementor_Atomic_Builder
 
     /**
      * Build Elementor elements from one section slice.
-     * Each section has exactly ONE top-level child (the Figma section container).
+     *
+     * For VISUAL_SECTION nodes (from Visual_Section_Detector): produces a two-level
+     * structure — outer full-width container (background) + inner canvas (frame_width,
+     * position:relative) with all children as position:absolute inside it.
+     *
+     * For legacy hierarchy sections: each child is treated as a root section.
      */
     public function build_section(array $section, array $images = [], array $color_map = []): array
     {
         $this->images    = $images;
         $this->color_map = $color_map;
-        $elements        = [];
 
+        if ('VISUAL_SECTION' === as_str($section['figma_type'] ?? '')) {
+            return [$this->root_section($section)];
+        }
+
+        // Legacy fallback: each direct child becomes its own root element.
+        $elements = [];
         foreach (($section['children'] ?? []) as $child) {
             if (! is_array($child)) {
                 continue;
@@ -71,8 +81,71 @@ final class Elementor_Atomic_Builder
             $cy = (float) ($child['layout']['y'] ?? 0);
             $elements[] = $this->node($child, true, 0.0, $cx, $cy, false);
         }
-
         return $elements;
+    }
+
+    /**
+     * Two-level structure for a visual section:
+     *   Outer: full-width container, carries background, centers the inner canvas.
+     *   Inner canvas: fixed pixel width = frame width, position:relative, coordinate origin.
+     *   Children: all position:absolute, offsets relative to (frame_x, section_y_abs).
+     */
+    private function root_section(array $section): array
+    {
+        $layout    = is_array($section['layout'] ?? null) ? $section['layout'] : [];
+        $frame_x   = (float) ($layout['x']      ?? 0);
+        $section_y = (float) ($layout['y']      ?? 0);
+        $frame_w   = (float) ($layout['width']  ?? 0);
+        $section_h = (float) ($layout['height'] ?? 0);
+
+        // ---- Inner canvas children (all absolutely positioned) ----
+        $inner_children = [];
+        foreach (($section['children'] ?? []) as $child) {
+            if (! is_array($child)) {
+                continue;
+            }
+            $inner_children[] = $this->node($child, false, $frame_w, $frame_x, $section_y, true);
+        }
+
+        // ---- Inner canvas ----
+        $inner_settings = [
+            'content_width'  => 'full',
+            'flex_direction' => 'column',
+        ];
+        if ($frame_w > 0) {
+            $inner_settings['width'] = ['unit' => 'px', 'size' => $frame_w, 'sizes' => []];
+        }
+        if ($section_h > 0) {
+            $inner_settings['min_height'] = ['unit' => 'px', 'size' => $section_h, 'sizes' => []];
+        }
+
+        $inner_canvas = [
+            'id'       => make_id(),
+            'elType'   => 'container',
+            'settings' => $inner_settings,
+            'elements' => $inner_children,
+            'isInner'  => true,
+        ];
+
+        // ---- Outer section (full-width, carries background, centers inner canvas) ----
+        $outer_settings = [
+            'content_width'        => 'full',
+            'flex_direction'       => 'row',
+            'flex_justify_content' => 'center',
+            'flex_align_items'     => 'flex-start',
+        ];
+        if ($section_h > 0) {
+            $outer_settings['min_height'] = ['unit' => 'px', 'size' => $section_h, 'sizes' => []];
+        }
+        $this->apply_background($outer_settings, $section);
+
+        return [
+            'id'       => make_id(),
+            'elType'   => 'container',
+            'settings' => $outer_settings,
+            'elements' => [$inner_canvas],
+            'isInner'  => false,
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -603,7 +676,9 @@ final class Elementor_Atomic_Builder
             || ! empty($item['font_weight'])
             || ! empty($item['line_height'])
             || ! empty($item['font_family'])
-            || ! empty($item['letter_spacing']);
+            || ! empty($item['letter_spacing'])
+            || ! empty($item['text_case'])
+            || ! empty($item['text_decoration']);
 
         if (! $has) {
             return;
@@ -628,6 +703,28 @@ final class Elementor_Atomic_Builder
         }
         if (! empty($item['letter_spacing'])) {
             $settings['typography_letter_spacing'] = ['unit' => 'px', 'size' => (float) $item['letter_spacing'], 'sizes' => []];
+        }
+
+        // Text transform (Figma textCase → CSS text-transform)
+        $text_case_map = [
+            'UPPER'       => 'uppercase',
+            'LOWER'       => 'lowercase',
+            'TITLE'       => 'capitalize',
+            'SMALL_CAPS'  => 'lowercase',
+        ];
+        $tc = as_str($item['text_case'] ?? '');
+        if (isset($text_case_map[$tc])) {
+            $settings['typography_text_transform'] = $text_case_map[$tc];
+        }
+
+        // Text decoration (Figma textDecoration → CSS text-decoration)
+        $text_deco_map = [
+            'UNDERLINE'      => 'underline',
+            'STRIKETHROUGH'  => 'line-through',
+        ];
+        $td = as_str($item['text_decoration'] ?? '');
+        if (isset($text_deco_map[$td])) {
+            $settings['typography_text_decoration'] = $text_deco_map[$td];
         }
     }
 

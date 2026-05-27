@@ -3,7 +3,7 @@
  * Plugin Name: Figma to Elementor Atomic
  * Plugin URI: https://example.com/figma-to-elementor-atomic
  * Description: Converts Figma layouts to Elementor pages using atomic elements with section-by-section processing and design tokens.
- * Version: 2.0.0
+ * Version: 2.1.0
  * Author: MVP
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -16,7 +16,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('FTEA_VERSION', '2.0.0');
+define('FTEA_VERSION', '2.1.0');
 define('FTEA_PLUGIN_FILE', __FILE__);
 define('FTEA_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FTEA_PLUGIN_URL', plugin_dir_url(__FILE__));

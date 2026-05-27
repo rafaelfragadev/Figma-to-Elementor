@@ -96,9 +96,11 @@ function extract_background_color(array $node): string
             $opacity = isset($fill['opacity']) ? (float) $fill['opacity'] : 1.0;
             $color   = $fill['color'];
             if ($opacity < 0.99) {
+                // Multiply fill-level opacity into the color alpha so that
+                // figma_color_to_css() can output rgba() when needed.
                 $color['a'] = ($color['a'] ?? 1.0) * $opacity;
             }
-            return figma_color_to_hex($color)['hex'];
+            return figma_color_to_css($color);
         }
     }
     return '';
