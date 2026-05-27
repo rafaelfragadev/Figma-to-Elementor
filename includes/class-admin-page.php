@@ -703,6 +703,19 @@ final class Admin_Page
 
         if ($page_id > 0) {
             $this->write_elementor_data($page_id, $all_elements);
+
+            // ---- COLLECT FONTS AND PERSIST TO POST META ----
+            $font_loader = new Font_Loader();
+            $font_loader->collect($section);
+            $detected = $font_loader->get_report()['detected'];
+            if (! empty($detected)) {
+                $existing = get_post_meta($page_id, '_ftea_fonts', true);
+                $merged   = array_values(array_unique(array_merge(
+                    is_array($existing) ? $existing : [],
+                    $detected
+                )));
+                update_post_meta($page_id, '_ftea_fonts', $merged);
+            }
         }
 
         // ---- LOG ----

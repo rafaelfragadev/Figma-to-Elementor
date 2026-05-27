@@ -196,21 +196,26 @@ final class Figma_Parser
         $text_color = extract_text_color($node);
 
         return [
-            'type'            => $is_heading ? 'heading' : 'text',
-            'figma_id'        => as_str($node['id'] ?? ''),
-            'name'            => get_node_name($node),
-            'content'         => $text,
-            'font_size'       => $font_size,
-            'font_weight'     => $font_weight,
-            'line_height'     => $line_height,
-            'letter_spacing'  => $letter_sp,
-            'text_align'      => $text_align,
-            'text_case'       => $text_case,
-            'text_decoration' => $text_deco,
-            'font_family'     => is_string($style['fontFamily'] ?? null) ? $style['fontFamily'] : null,
-            'text_color'      => $text_color,
-            'opacity'         => extract_opacity($node),
-            'layout'          => extract_auto_layout($node),
+            'type'                   => $is_heading ? 'heading' : 'text',
+            'figma_id'               => as_str($node['id'] ?? ''),
+            'name'                   => get_node_name($node),
+            'content'                => $text,
+            'font_size'              => $font_size,
+            'font_weight'            => $font_weight,
+            'line_height'            => $line_height,
+            'letter_spacing'         => $letter_sp,
+            'text_align'             => $text_align,
+            'text_align_vertical'    => as_str($style['textAlignVertical'] ?? ''),
+            'text_case'              => $text_case,
+            'text_decoration'        => $text_deco,
+            'font_family'            => is_string($style['fontFamily'] ?? null) ? $style['fontFamily'] : null,
+            'font_post_script_name'  => is_string($style['fontPostScriptName'] ?? null) ? $style['fontPostScriptName'] : null,
+            'line_height_percent'    => isset($style['lineHeightPercent']) ? (float) $style['lineHeightPercent'] : null,
+            'line_height_unit'       => as_str($style['lineHeightUnit'] ?? ''),
+            'blend_mode'             => as_str($node['blendMode'] ?? ''),
+            'text_color'             => $text_color,
+            'opacity'                => extract_opacity($node),
+            'layout'                 => extract_auto_layout($node),
         ];
     }
 
@@ -281,16 +286,20 @@ final class Figma_Parser
         $this->stats['texts'] = max(0, $this->stats['texts'] - 1);
 
         return [
-            'type'        => 'button',
-            'figma_id'    => as_str($node['id'] ?? ''),
-            'name'        => $name,
-            'content'     => sanitize_text_field($text),
-            'background'  => $background,
-            'text_color'  => as_str($children[0]['text_color'] ?? ''),
-            'font_size'   => $children[0]['font_size'] ?? null,
-            'font_weight' => $children[0]['font_weight'] ?? null,
-            'opacity'     => extract_opacity($node),
-            'layout'      => $layout,
+            'type'                => 'button',
+            'figma_id'            => as_str($node['id'] ?? ''),
+            'name'                => $name,
+            'content'             => sanitize_text_field($text),
+            'background'          => $background,
+            'background_gradient' => extract_gradient($node),
+            'border_radius'       => extract_border_radius($node),
+            'text_color'          => as_str($children[0]['text_color'] ?? ''),
+            'font_size'           => $children[0]['font_size'] ?? null,
+            'font_weight'         => $children[0]['font_weight'] ?? null,
+            'font_family'         => $children[0]['font_family'] ?? null,
+            'letter_spacing'      => $children[0]['letter_spacing'] ?? null,
+            'opacity'             => extract_opacity($node),
+            'layout'              => $layout,
         ];
     }
 

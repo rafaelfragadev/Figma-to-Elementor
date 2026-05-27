@@ -3,7 +3,7 @@
  * Plugin Name: Figma to Elementor Atomic
  * Plugin URI: https://example.com/figma-to-elementor-atomic
  * Description: Converts Figma layouts to Elementor pages using atomic elements with section-by-section processing and design tokens.
- * Version: 2.1.0
+ * Version: 2.2.0
  * Author: MVP
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -16,7 +16,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('FTEA_VERSION', '2.1.0');
+define('FTEA_VERSION', '2.2.0');
 define('FTEA_PLUGIN_FILE', __FILE__);
 define('FTEA_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FTEA_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -38,9 +38,11 @@ require_once FTEA_PLUGIN_DIR . 'includes/class-elementor-atomic-builder.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-responsive-mapper.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-import-logger.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-template-exporter.php';
+require_once FTEA_PLUGIN_DIR . 'includes/class-font-loader.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-admin-page.php';
 
 add_action('admin_menu', __NAMESPACE__ . '\\ftea_register_menu', 1);
+add_action('wp_enqueue_scripts', __NAMESPACE__ . '\\ftea_frontend_fonts');
 add_action('admin_post_ftea_load_frames', __NAMESPACE__ . '\\ftea_handle_load_frames');
 add_action('admin_post_ftea_import_section', __NAMESPACE__ . '\\ftea_handle_import_section');
 add_action('admin_post_ftea_import_all', __NAMESPACE__ . '\\ftea_handle_import_all');
@@ -140,4 +142,26 @@ function ftea_on_activate(): void
 function ftea_on_deactivate(): void
 {
     // nothing to clean up
+}
+
+/**
+ * Enqueue Google Fonts on the front-end for pages imported via FTEA.
+ * Font families are stored in the `_ftea_fonts` post meta during import.
+ */
+function ftea_frontend_fonts(): void
+{
+    if (! is_singular()) {
+        return;
+    }
+    $post_id = (int) get_the_ID();
+    if ($post_id <= 0) {
+        return;
+    }
+    $fonts = get_post_meta($post_id, '_ftea_fonts', true);
+    if (empty($fonts) || ! is_array($fonts)) {
+        return;
+    }
+    $loader = new Font_Loader();
+    $loader->collect_families($fonts);
+    $loader->enqueue();
 }

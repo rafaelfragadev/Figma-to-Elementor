@@ -98,9 +98,12 @@ final class Elementor_Atomic_Builder
         $frame_w   = (float) ($layout['width']  ?? 0);
         $section_h = (float) ($layout['height'] ?? 0);
 
+        // ---- Group card clusters before building Elementor elements ----
+        $section_children = $this->detect_card_groups($section['children'] ?? [], $frame_x, $section_y);
+
         // ---- Inner canvas children (all absolutely positioned) ----
         $inner_children = [];
-        foreach (($section['children'] ?? []) as $child) {
+        foreach ($section_children as $child) {
             if (! is_array($child)) {
                 continue;
             }
@@ -133,6 +136,7 @@ final class Elementor_Atomic_Builder
             'flex_direction'       => 'row',
             'flex_justify_content' => 'center',
             'flex_align_items'     => 'flex-start',
+            'custom_css'           => 'selector { overflow: hidden; }',
         ];
         if ($section_h > 0) {
             $outer_settings['min_height'] = ['unit' => 'px', 'size' => $section_h, 'sizes' => []];
@@ -457,6 +461,16 @@ final class Elementor_Atomic_Builder
         $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
         $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
         $this->apply_widget_opacity($settings, $item);
+
+        $iso = $this->widget_isolation_css($item, 'heading');
+        if ($iso !== '') {
+            $settings['custom_css'] = $iso;
+        }
+        $z = $this->z_index_for(as_str($item['type'] ?? ''), as_str($item['name'] ?? ''));
+        if ($z > 0) {
+            $settings['z_index'] = $z;
+        }
+
         return $this->widget('heading', $settings);
     }
 
@@ -475,6 +489,16 @@ final class Elementor_Atomic_Builder
         $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
         $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
         $this->apply_widget_opacity($settings, $item);
+
+        $iso = $this->widget_isolation_css($item, 'text-editor');
+        if ($iso !== '') {
+            $settings['custom_css'] = $iso;
+        }
+        $z = $this->z_index_for(as_str($item['type'] ?? ''), as_str($item['name'] ?? ''));
+        if ($z > 0) {
+            $settings['z_index'] = $z;
+        }
+
         return $this->widget('text-editor', $settings);
     }
 
@@ -485,18 +509,82 @@ final class Elementor_Atomic_Builder
         float $parent_y,
         bool  $force_absolute
     ): array {
+        $layout = is_array($item['layout'] ?? null) ? $item['layout'] : [];
+        $btn_w  = (float) ($layout['width']  ?? 0);
+        $btn_h  = (float) ($layout['height'] ?? 0);
+
         $settings = [
             'text' => esc_html(as_str($item['content'] ?? __('Button', 'ftea'))),
             'link' => ['url' => '#'],
         ];
+
+        // Solid background (fallback; gradient is applied via custom_css below)
         if (! empty($item['background'])) {
-            $settings['background_color'] = $this->resolve_color(as_str($item['background']));
+            $settings['button_background_color'] = $this->resolve_color(as_str($item['background']));
         }
+
+        // Text color (explicit, never inherited)
+        $btn_text_color = as_str($item['text_color'] ?? '');
+        if ($btn_text_color !== '') {
+            $settings['button_text_color'] = $this->resolve_color($btn_text_color);
+        }
+
+        // Border radius
+        $br = is_array($item['border_radius'] ?? null) ? $item['border_radius'] : null;
+        if ($br) {
+            $settings['border_radius'] = [
+                'unit'     => 'px',
+                'top'      => (string) (float) ($br['tl'] ?? 0),
+                'right'    => (string) (float) ($br['tr'] ?? 0),
+                'bottom'   => (string) (float) ($br['br'] ?? 0),
+                'left'     => (string) (float) ($br['bl'] ?? 0),
+                'isLinked' => false,
+            ];
+        }
+
+        // Explicit pixel width/height — never full-width
+        if ($btn_w > 0) {
+            $settings['_element_width']        = 'initial';
+            $settings['_element_custom_width'] = ['unit' => 'px', 'size' => $btn_w, 'sizes' => []];
+        }
+
         $this->apply_typography($settings, $item);
-        $this->apply_text_color($settings, $item);
-        $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
         $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
         $this->apply_widget_opacity($settings, $item);
+
+        // Custom CSS: override theme, apply gradient if present, force height
+        $css_parts = [];
+
+        // Theme isolation
+        $iso = $this->widget_isolation_css($item, 'button');
+        if ($iso !== '') {
+            $css_parts[] = $iso;
+        }
+
+        // Gradient background via CSS (Elementor button widget doesn't natively support gradients)
+        $grad = is_array($item['background_gradient'] ?? null) ? $item['background_gradient'] : null;
+        if ($grad !== null) {
+            $g_type = as_str($grad['gradient_type'] ?? 'linear');
+            if ('radial' === $g_type) {
+                $bg_css = 'radial-gradient(circle, ' . as_str($grad['color_a'] ?? '#000') . ' ' . (float)($grad['stop_a'] ?? 0) . '%, ' . as_str($grad['color_b'] ?? '#fff') . ' ' . (float)($grad['stop_b'] ?? 100) . '%)';
+            } else {
+                $angle  = (int) ($grad['angle'] ?? 90);
+                $bg_css = 'linear-gradient(' . $angle . 'deg, ' . as_str($grad['color_a'] ?? '#000') . ' ' . (float)($grad['stop_a'] ?? 0) . '%, ' . as_str($grad['color_b'] ?? '#fff') . ' ' . (float)($grad['stop_b'] ?? 100) . '%)';
+            }
+            $css_parts[] = 'selector .elementor-button, selector a.elementor-button { background: ' . $bg_css . ' !important; }';
+        }
+
+        // Explicit height
+        if ($btn_h > 0) {
+            $css_parts[] = 'selector .elementor-button, selector a.elementor-button { height: ' . $btn_h . 'px; line-height: ' . $btn_h . 'px; padding-top: 0; padding-bottom: 0; }';
+        }
+
+        if (! empty($css_parts)) {
+            $settings['custom_css'] = implode("\n", $css_parts);
+        }
+
+        $settings['z_index'] = $this->z_index_for('button', as_str($item['name'] ?? ''));
+
         return $this->widget('button', $settings);
     }
 
@@ -688,6 +776,14 @@ final class Elementor_Atomic_Builder
 
         if (! empty($item['font_family'])) {
             $settings['typography_font_family'] = as_str($item['font_family']);
+        } elseif (! empty($item['font_post_script_name'])) {
+            // Derive a human-readable family from the PostScript name (e.g. "BarlowCondensed-Bold" → "Barlow Condensed")
+            $ps  = as_str($item['font_post_script_name']);
+            $fam = preg_replace('/[-_](Bold|Italic|Light|Regular|Medium|SemiBold|ExtraBold|Black|Thin|Heavy|Condensed|Narrow|Wide|Expanded).*$/i', '', $ps);
+            $fam = trim(preg_replace('/(?<=[a-z])(?=[A-Z])/', ' ', $fam) ?: $fam);
+            if ($fam !== '') {
+                $settings['typography_font_family'] = $fam;
+            }
         }
         if (! empty($item['font_size'])) {
             $fs = (float) $item['font_size'];
@@ -840,5 +936,243 @@ final class Elementor_Atomic_Builder
         if ($fs >= 28) return 'h3';
         if ($fs >= 22) return 'h4';
         return 'h2';
+    }
+
+    // -------------------------------------------------------------------------
+    // Z-index
+    // -------------------------------------------------------------------------
+
+    private function z_index_for(string $type, string $name): int
+    {
+        $n = strtolower($name);
+        if (strpos($n, 'bg') !== false || strpos($n, 'background') !== false) {
+            return 0;
+        }
+        if (strpos($n, 'pattern') !== false || strpos($n, 'texture') !== false) {
+            return 1;
+        }
+        if (strpos($n, 'decorat') !== false || strpos($n, 'ornament') !== false) {
+            return 2;
+        }
+        switch ($type) {
+            case 'shape':   return 1;
+            case 'image':   return 5;
+            case 'text':    return 10;
+            case 'heading': return 10;
+            case 'button':  return 20;
+            default:        return 3;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Theme isolation CSS
+    // -------------------------------------------------------------------------
+
+    /**
+     * Generates Elementor custom_css that forces the widget's text/font/color
+     * to match Figma exactly, bypassing any theme stylesheet inheritance.
+     */
+    private function widget_isolation_css(array $item, string $widget_type): string
+    {
+        static $inner_map = [
+            'heading'     => '.elementor-heading-title',
+            'text-editor' => '.elementor-text-editor, .elementor-text-editor p',
+            'button'      => '.elementor-button, a.elementor-button',
+        ];
+
+        $inner = $inner_map[$widget_type] ?? '';
+        $rules = [];
+
+        $color  = as_str($item['text_color'] ?? '');
+        $family = as_str($item['font_family'] ?? '');
+        $size   = ! empty($item['font_size'])       ? (float) $item['font_size']       : 0.0;
+        $weight = ! empty($item['font_weight'])     ? (int)   $item['font_weight']     : 0;
+        $lh     = ! empty($item['line_height'])     ? (float) $item['line_height']     : 0.0;
+        $ls     = (isset($item['letter_spacing']) && is_numeric($item['letter_spacing']))
+                    ? (float) $item['letter_spacing'] : null;
+        $align  = as_str($item['text_align'] ?? '');
+
+        if ($color  !== '') $rules[] = "color: {$color} !important";
+        if ($family !== '') $rules[] = "font-family: '{$family}', sans-serif !important";
+        if ($size   > 0)    $rules[] = "font-size: {$size}px !important";
+        if ($weight > 0)    $rules[] = "font-weight: {$weight} !important";
+        if ($lh     > 0)    $rules[] = "line-height: {$lh}px !important";
+        if ($ls !== null)   $rules[] = "letter-spacing: {$ls}px !important";
+
+        if ($align !== '') {
+            static $align_map = ['LEFT' => 'left', 'CENTER' => 'center', 'RIGHT' => 'right', 'JUSTIFIED' => 'justify'];
+            $css_align = $align_map[$align] ?? '';
+            if ($css_align !== '') $rules[] = "text-align: {$css_align} !important";
+        }
+
+        if (empty($rules)) {
+            return '';
+        }
+
+        $declarations = implode('; ', $rules) . ';';
+
+        if ($inner === '') {
+            return "selector { {$declarations} }";
+        }
+
+        // Build "selector .elementor-X, selector .elementor-X p { ... }"
+        $parts    = array_map('trim', explode(',', $inner));
+        $prefixed = array_map(function ($p) { return "selector {$p}"; }, $parts);
+        return implode(', ', $prefixed) . " { {$declarations} }";
+    }
+
+    // -------------------------------------------------------------------------
+    // Card group detection
+    // -------------------------------------------------------------------------
+
+    /**
+     * Scans the flat list of visual-section children and wraps groups of
+     * similar-sized, same-row containers into a single flex-row CARD_GROUP
+     * container, preserving their absolute origin within the inner canvas.
+     *
+     * @param array<int, array> $nodes      Intermediate tree nodes
+     * @param float             $frame_x    Absolute X of the Figma frame
+     * @param float             $section_y  Absolute Y of the current section
+     */
+    private function detect_card_groups(array $nodes, float $frame_x, float $section_y): array
+    {
+        // Only containers with children qualify as potential cards.
+        $containers = [];
+        $others     = [];
+
+        foreach ($nodes as $node) {
+            if (
+                is_array($node)
+                && as_str($node['type'] ?? '') === 'container'
+                && ! empty($node['children'])
+            ) {
+                $containers[] = $node;
+            } else {
+                if (is_array($node)) {
+                    $others[] = $node;
+                }
+            }
+        }
+
+        if (count($containers) < 2) {
+            return $nodes;
+        }
+
+        $used   = array_fill(0, count($containers), false);
+        $groups = [];
+
+        for ($i = 0; $i < count($containers); $i++) {
+            if ($used[$i]) {
+                continue;
+            }
+            $group    = [$containers[$i]];
+            $used[$i] = true;
+
+            $li = is_array($containers[$i]['layout'] ?? null) ? $containers[$i]['layout'] : [];
+            $wi = (float) ($li['width']  ?? 0);
+            $hi = (float) ($li['height'] ?? 0);
+            $yi = (float) ($li['y']      ?? 0);
+
+            for ($j = $i + 1; $j < count($containers); $j++) {
+                if ($used[$j]) {
+                    continue;
+                }
+                $lj = is_array($containers[$j]['layout'] ?? null) ? $containers[$j]['layout'] : [];
+                $wj = (float) ($lj['width']  ?? 0);
+                $hj = (float) ($lj['height'] ?? 0);
+                $yj = (float) ($lj['y']      ?? 0);
+
+                if ($wi <= 0 || $wj <= 0) {
+                    continue;
+                }
+
+                $w_ratio = min($wi, $wj) / max($wi, $wj);
+                $h_ratio = ($hi > 0 && $hj > 0) ? min($hi, $hj) / max($hi, $hj) : 1.0;
+                $y_diff  = abs($yi - $yj);
+
+                // Similar dimensions (≥80% match) at similar Y (within 40px)
+                if ($w_ratio >= 0.80 && $h_ratio >= 0.75 && $y_diff <= 40) {
+                    $group[]  = $containers[$j];
+                    $used[$j] = true;
+                }
+            }
+
+            $groups[] = $group;
+        }
+
+        $result = $others;
+        foreach ($groups as $group) {
+            if (count($group) >= 2) {
+                $result[] = $this->make_card_group($group);
+            } else {
+                $result[] = $group[0];
+            }
+        }
+
+        // Re-sort by Y so painting order matches Figma.
+        usort($result, function ($a, $b) {
+            $ya = (float) ((is_array($a['layout'] ?? null) ? $a['layout'] : [])['y'] ?? 0);
+            $yb = (float) ((is_array($b['layout'] ?? null) ? $b['layout'] : [])['y'] ?? 0);
+            return $ya <=> $yb;
+        });
+
+        return $result;
+    }
+
+    /** Wraps an array of sibling card containers into a flex-row CARD_GROUP node. */
+    private function make_card_group(array $cards): array
+    {
+        // Sort cards left to right.
+        usort($cards, function ($a, $b) {
+            $xa = (float) ((is_array($a['layout'] ?? null) ? $a['layout'] : [])['x'] ?? 0);
+            $xb = (float) ((is_array($b['layout'] ?? null) ? $b['layout'] : [])['x'] ?? 0);
+            return $xa <=> $xb;
+        });
+
+        $fl = is_array($cards[0]['layout'] ?? null) ? $cards[0]['layout'] : [];
+        $ll = is_array(end($cards)['layout'] ?? null) ? end($cards)['layout'] : [];
+
+        $group_x  = (float) ($fl['x'] ?? 0);
+        $group_y  = (float) ($fl['y'] ?? 0);
+        $last_x   = (float) ($ll['x'] ?? 0);
+        $last_w   = (float) ($ll['width'] ?? 0);
+        $group_w  = ($last_x + $last_w) - $group_x;
+
+        $heights  = array_map(function ($c) { return (float) ((is_array($c['layout'] ?? null) ? $c['layout'] : [])['height'] ?? 0); }, $cards);
+        $group_h  = max($heights ?: [0]);
+
+        $gap = 0.0;
+        if (count($cards) > 1) {
+            $l0 = is_array($cards[0]['layout'] ?? null) ? $cards[0]['layout'] : [];
+            $l1 = is_array($cards[1]['layout'] ?? null) ? $cards[1]['layout'] : [];
+            $gap = max(0.0, (float) ($l1['x'] ?? 0) - ((float) ($l0['x'] ?? 0) + (float) ($l0['width'] ?? 0)));
+        }
+
+        return [
+            'type'                 => 'container',
+            'figma_type'           => 'CARD_GROUP',
+            'figma_id'             => '',
+            'name'                 => 'Card Group',
+            'is_card_group'        => true,
+            'layout'               => [
+                'is_auto_layout' => true,
+                'direction'      => 'row',
+                'gap'            => $gap,
+                'padding'        => ['top' => 0, 'right' => 0, 'bottom' => 0, 'left' => 0],
+                'primary_axis'   => 'MIN',
+                'counter_axis'   => 'MIN',
+                'positioning'    => '',
+                'x'              => $group_x,
+                'y'              => $group_y,
+                'width'          => $group_w,
+                'height'         => $group_h,
+            ],
+            'background'           => '',
+            'background_image_ref' => '',
+            'background_gradient'  => null,
+            'border_radius'        => null,
+            'opacity'              => 1.0,
+            'children'             => $cards,
+        ];
     }
 }
