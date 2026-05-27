@@ -137,6 +137,13 @@ final class Figma_Parser
 
     private function parse_container(array $node, bool $is_root): ?array
     {
+        // Force SVG export for any node named "logo" — bypasses the strict should_export_as_svg
+        // heuristics which would block logos that contain text or have complex child structures.
+        $name_lc = strtolower(get_node_name($node));
+        if (! $is_root && ! has_image_fill($node) && strpos($name_lc, 'logo') !== false) {
+            return $this->parse_svg($node);
+        }
+
         // Only export as SVG if the node itself has NO image fill and matches icon heuristics.
         // Never SVG-export a node that has an image fill — those should become raster images.
         if (! $is_root && ! has_image_fill($node) && $this->should_export_as_svg($node)) {
