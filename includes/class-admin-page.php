@@ -176,6 +176,7 @@ final class Admin_Page
         <div class="ftea-card">
             <h2><?php printf(esc_html__('Import Sections — %s', 'ftea'), $frame_name); ?></h2>
             <p><?php printf(esc_html__('%d section(s) detected. Import one at a time to validate each section before advancing.', 'ftea'), count($sections)); ?></p>
+            <?php $this->render_debug_panel($sections); ?>
 
             <?php if ($page_id > 0) : ?>
                 <p>
@@ -768,5 +769,139 @@ final class Admin_Page
             }
         }
         return $map;
+    }
+
+    // -------------------------------------------------------------------------
+    // Debug panel (Phase 7)
+    // -------------------------------------------------------------------------
+
+    private function render_debug_panel(array $sections): void
+    {
+        if (empty($sections)) {
+            return;
+        }
+
+        $total_elements = 0;
+        $total_images   = 0;
+        $has_image_bg   = 0;
+        $has_gradient   = 0;
+        $has_solid_bg   = 0;
+        $auto_layout    = 0;
+        $frame_sections = 0;
+
+        foreach ($sections as $sec) {
+            $total_elements += (int) ($sec['element_count'] ?? 0);
+            $figma_type      = as_str($sec['figma_type'] ?? '');
+            $bg_type         = as_str($sec['background_type'] ?? 'none');
+
+            if ('FRAME' === $figma_type) {
+                $frame_sections++;
+            }
+            if ('image' === $bg_type) {
+                $has_image_bg++;
+            } elseif ('gradient' === $bg_type) {
+                $has_gradient++;
+            } elseif ('solid' === $bg_type) {
+                $has_solid_bg++;
+            }
+            if (! empty($sec['is_auto_layout'])) {
+                $auto_layout++;
+            }
+        }
+        ?>
+        <details class="ftea-debug-panel">
+            <summary><?php esc_html_e('Debug Panel — Section Analysis', 'ftea'); ?></summary>
+
+            <div class="ftea-debug-grid">
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo count($sections); ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('Sections', 'ftea'); ?></span>
+                </div>
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo $frame_sections; ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('FRAME nodes', 'ftea'); ?></span>
+                </div>
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo $total_elements; ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('Total nodes', 'ftea'); ?></span>
+                </div>
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo $auto_layout; ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('Auto-layout', 'ftea'); ?></span>
+                </div>
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo $has_image_bg; ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('Image BG', 'ftea'); ?></span>
+                </div>
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo $has_gradient; ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('Gradient BG', 'ftea'); ?></span>
+                </div>
+                <div class="ftea-debug-stat">
+                    <span class="ftea-debug-num"><?php echo $has_solid_bg; ?></span>
+                    <span class="ftea-debug-label"><?php esc_html_e('Solid BG', 'ftea'); ?></span>
+                </div>
+            </div>
+
+            <table class="wp-list-table widefat striped ftea-debug-table" style="margin-top:12px">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th><?php esc_html_e('Name', 'ftea'); ?></th>
+                        <th><?php esc_html_e('Figma Type', 'ftea'); ?></th>
+                        <th><?php esc_html_e('Layout', 'ftea'); ?></th>
+                        <th><?php esc_html_e('Background', 'ftea'); ?></th>
+                        <th><?php esc_html_e('BG Color', 'ftea'); ?></th>
+                        <th><?php esc_html_e('Y', 'ftea'); ?></th>
+                        <th><?php esc_html_e('H (px)', 'ftea'); ?></th>
+                        <th><?php esc_html_e('Nodes', 'ftea'); ?></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($sections as $sec) :
+                        $bg_type = as_str($sec['background_type'] ?? 'none');
+                        $bg_css  = as_str($sec['background'] ?? '');
+                        $is_auto = ! empty($sec['is_auto_layout']);
+                        $f_type  = as_str($sec['figma_type'] ?? '—');
+                        $badge_cls = [
+                            'image'    => 'ftea-badge-done',
+                            'gradient' => 'ftea-badge-pending',
+                            'solid'    => '',
+                            'none'     => 'ftea-badge-error',
+                        ][$bg_type] ?? '';
+                    ?>
+                        <tr>
+                            <td><?php echo (int) $sec['index'] + 1; ?></td>
+                            <td><?php echo esc_html($sec['name'] ?? ''); ?></td>
+                            <td><code><?php echo esc_html($f_type); ?></code></td>
+                            <td>
+                                <?php if ($is_auto) : ?>
+                                    <span class="ftea-badge ftea-badge-done"><?php esc_html_e('flex', 'ftea'); ?></span>
+                                <?php else : ?>
+                                    <span class="ftea-badge ftea-badge-pending"><?php esc_html_e('abs', 'ftea'); ?></span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <span class="ftea-badge <?php echo esc_attr($badge_cls); ?>">
+                                    <?php echo esc_html($bg_type); ?>
+                                </span>
+                            </td>
+                            <td>
+                                <?php if ($bg_css) : ?>
+                                    <span class="ftea-color-swatch" style="background:<?php echo esc_attr($bg_css); ?>"></span>
+                                    <code style="font-size:10px"><?php echo esc_html($bg_css); ?></code>
+                                <?php else : ?>
+                                    <span class="ftea-meta">—</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="ftea-meta"><?php echo (int) ($sec['y'] ?? 0); ?>px</td>
+                            <td class="ftea-meta"><?php echo (int) ($sec['height'] ?? 0); ?>px</td>
+                            <td class="ftea-meta"><?php echo (int) ($sec['element_count'] ?? 0); ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </details>
+        <?php
     }
 }

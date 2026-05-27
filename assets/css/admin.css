@@ -97,3 +97,69 @@
     border-radius: 2px;
     font-size: .9em;
 }
+
+/* ---- Debug Panel ---- */
+.ftea-debug-panel {
+    margin-top: 16px;
+    padding: 10px 14px;
+    background: #f0f4ff;
+    border: 1px solid #b3c8f5;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+.ftea-debug-panel summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #1d2d62;
+    margin-bottom: 4px;
+}
+
+.ftea-debug-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 0 8px;
+    border-bottom: 1px solid #c5d3f0;
+    margin-bottom: 8px;
+}
+
+.ftea-debug-stat {
+    background: #fff;
+    border: 1px solid #c5d3f0;
+    border-radius: 4px;
+    padding: 8px 14px;
+    text-align: center;
+    min-width: 80px;
+}
+
+.ftea-debug-num {
+    display: block;
+    font-size: 1.5em;
+    font-weight: 700;
+    color: #1d2d62;
+    line-height: 1.2;
+}
+
+.ftea-debug-label {
+    display: block;
+    font-size: 0.78em;
+    color: #666;
+    white-space: nowrap;
+}
+
+.ftea-debug-table td,
+.ftea-debug-table th {
+    padding: 6px 10px;
+    vertical-align: middle;
+}
+
+.ftea-color-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    border: 1px solid rgba(0,0,0,.15);
+    vertical-align: middle;
+    margin-right: 4px;
+}

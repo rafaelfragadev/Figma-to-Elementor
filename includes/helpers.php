@@ -71,6 +71,21 @@ function figma_color_to_hex(array $color): array
     ];
 }
 
+/**
+ * Returns rgba() string when alpha < 1, hex otherwise.
+ */
+function figma_color_to_css(array $color): string
+{
+    $result = figma_color_to_hex($color);
+    if ($result['alpha'] < 0.99) {
+        $r = hexdec(substr($result['hex'], 1, 2));
+        $g = hexdec(substr($result['hex'], 3, 2));
+        $b = hexdec(substr($result['hex'], 5, 2));
+        return sprintf('rgba(%d,%d,%d,%.2f)', $r, $g, $b, $result['alpha']);
+    }
+    return $result['hex'];
+}
+
 function extract_background_color(array $node): string
 {
     foreach (($node['fills'] ?? []) as $fill) {
@@ -78,7 +93,12 @@ function extract_background_color(array $node): string
             continue;
         }
         if (($fill['type'] ?? '') === 'SOLID' && isset($fill['color']) && is_array($fill['color'])) {
-            return figma_color_to_hex($fill['color'])['hex'];
+            $opacity = isset($fill['opacity']) ? (float) $fill['opacity'] : 1.0;
+            $color   = $fill['color'];
+            if ($opacity < 0.99) {
+                $color['a'] = ($color['a'] ?? 1.0) * $opacity;
+            }
+            return figma_color_to_hex($color)['hex'];
         }
     }
     return '';
@@ -112,6 +132,9 @@ function extract_background_image_ref(array $node): string
     return '';
 }
 
+/**
+ * Returns the full gradient definition with ALL stops (not just first/last).
+ */
 function extract_gradient(array $node): ?array
 {
     foreach (($node['fills'] ?? []) as $fill) {
@@ -122,19 +145,33 @@ function extract_gradient(array $node): ?array
         if (strpos($type, 'GRADIENT') !== 0) {
             continue;
         }
-        $stops = isset($fill['gradientStops']) && is_array($fill['gradientStops']) ? $fill['gradientStops'] : [];
+        $raw_stops = isset($fill['gradientStops']) && is_array($fill['gradientStops'])
+            ? $fill['gradientStops']
+            : [];
+        if (count($raw_stops) < 2) {
+            continue;
+        }
+
+        // Build full stop list.
+        $stops = [];
+        foreach ($raw_stops as $s) {
+            if (! isset($s['color']) || ! is_array($s['color'])) {
+                continue;
+            }
+            $stops[] = [
+                'color'    => figma_color_to_hex($s['color'])['hex'],
+                'position' => (float) (($s['position'] ?? 0) * 100),
+            ];
+        }
         if (count($stops) < 2) {
             continue;
         }
-        $last        = $stops[count($stops) - 1];
-        $first_color = isset($stops[0]['color']) && is_array($stops[0]['color']) ? $stops[0]['color'] : [];
-        $last_color  = isset($last['color']) && is_array($last['color']) ? $last['color'] : [];
-        $color_a     = figma_color_to_hex($first_color);
-        $color_b     = figma_color_to_hex($last_color);
-        $angle       = 180;
 
+        $angle = 180;
         if ('GRADIENT_LINEAR' === $type) {
-            $handles = isset($fill['gradientHandlePositions']) && is_array($fill['gradientHandlePositions']) ? $fill['gradientHandlePositions'] : [];
+            $handles = isset($fill['gradientHandlePositions']) && is_array($fill['gradientHandlePositions'])
+                ? $fill['gradientHandlePositions']
+                : [];
             if (count($handles) >= 2) {
                 $dx    = (float) ($handles[1]['x'] ?? 0) - (float) ($handles[0]['x'] ?? 0);
                 $dy    = (float) ($handles[1]['y'] ?? 0) - (float) ($handles[0]['y'] ?? 0);
@@ -144,11 +181,12 @@ function extract_gradient(array $node): ?array
 
         return [
             'gradient_type' => 'GRADIENT_RADIAL' === $type ? 'radial' : 'linear',
-            'color_a'       => $color_a['hex'],
-            'color_b'       => $color_b['hex'],
-            'stop_a'        => (float) (($stops[0]['position'] ?? 0) * 100),
-            'stop_b'        => (float) (($last['position'] ?? 1) * 100),
+            'color_a'       => $stops[0]['color'],
+            'color_b'       => $stops[count($stops) - 1]['color'],
+            'stop_a'        => $stops[0]['position'],
+            'stop_b'        => $stops[count($stops) - 1]['position'],
             'angle'         => $angle,
+            'stops'         => $stops,
         ];
     }
     return null;
@@ -160,7 +198,9 @@ function extract_border_radius(array $node): ?array
         $r = (float) $node['cornerRadius'];
         return ['tl' => $r, 'tr' => $r, 'br' => $r, 'bl' => $r];
     }
-    $radii = isset($node['rectangleCornerRadii']) && is_array($node['rectangleCornerRadii']) ? $node['rectangleCornerRadii'] : [];
+    $radii = isset($node['rectangleCornerRadii']) && is_array($node['rectangleCornerRadii'])
+        ? $node['rectangleCornerRadii']
+        : [];
     if (4 === count($radii) && max(array_map('floatval', $radii)) > 0) {
         return [
             'tl' => (float) $radii[0],
@@ -174,7 +214,9 @@ function extract_border_radius(array $node): ?array
 
 function extract_bounding_box(array $node): array
 {
-    $box = isset($node['absoluteBoundingBox']) && is_array($node['absoluteBoundingBox']) ? $node['absoluteBoundingBox'] : [];
+    $box = isset($node['absoluteBoundingBox']) && is_array($node['absoluteBoundingBox'])
+        ? $node['absoluteBoundingBox']
+        : [];
     return [
         'x'      => isset($box['x']) ? (float) $box['x'] : 0.0,
         'y'      => isset($box['y']) ? (float) $box['y'] : 0.0,
@@ -183,19 +225,25 @@ function extract_bounding_box(array $node): array
     ];
 }
 
+/**
+ * Extracts layout information.
+ * Includes is_auto_layout flag so the builder can distinguish flex vs absolute containers.
+ */
 function extract_auto_layout(array $node): array
 {
-    $layout_mode = as_str($node['layoutMode'] ?? '');
-    $box         = extract_bounding_box($node);
+    $layout_mode  = as_str($node['layoutMode'] ?? '');
+    $is_auto      = ($layout_mode !== '');
+    $box          = extract_bounding_box($node);
 
     return [
-        'direction'    => 'HORIZONTAL' === $layout_mode ? 'row' : ('VERTICAL' === $layout_mode ? 'column' : ''),
-        'gap'          => isset($node['itemSpacing']) ? (float) $node['itemSpacing'] : null,
-        'padding'      => [
-            'top'    => isset($node['paddingTop']) ? (float) $node['paddingTop'] : 0,
-            'right'  => isset($node['paddingRight']) ? (float) $node['paddingRight'] : 0,
+        'is_auto_layout' => $is_auto,
+        'direction'      => 'HORIZONTAL' === $layout_mode ? 'row' : ($is_auto ? 'column' : ''),
+        'gap'            => isset($node['itemSpacing']) ? (float) $node['itemSpacing'] : null,
+        'padding'        => [
+            'top'    => isset($node['paddingTop'])    ? (float) $node['paddingTop']    : 0,
+            'right'  => isset($node['paddingRight'])  ? (float) $node['paddingRight']  : 0,
             'bottom' => isset($node['paddingBottom']) ? (float) $node['paddingBottom'] : 0,
-            'left'   => isset($node['paddingLeft']) ? (float) $node['paddingLeft'] : 0,
+            'left'   => isset($node['paddingLeft'])   ? (float) $node['paddingLeft']   : 0,
         ],
         'primary_axis'  => as_str($node['primaryAxisAlignItems'] ?? ''),
         'counter_axis'  => as_str($node['counterAxisAlignItems'] ?? ''),
@@ -207,14 +255,20 @@ function extract_auto_layout(array $node): array
     ];
 }
 
+/** Node-level opacity (0.0–1.0). */
+function extract_opacity(array $node): float
+{
+    return isset($node['opacity']) ? max(0.0, min(1.0, (float) $node['opacity'])) : 1.0;
+}
+
 function map_align(string $figma_align): string
 {
     $map = [
-        'MIN'          => 'flex-start',
-        'CENTER'       => 'center',
-        'MAX'          => 'flex-end',
-        'SPACE_BETWEEN'=> 'space-between',
-        'BASELINE'     => 'baseline',
+        'MIN'           => 'flex-start',
+        'CENTER'        => 'center',
+        'MAX'           => 'flex-end',
+        'SPACE_BETWEEN' => 'space-between',
+        'BASELINE'      => 'baseline',
     ];
     return $map[$figma_align] ?? '';
 }

@@ -7,8 +7,18 @@ if (! defined('ABSPATH')) {
 }
 
 /**
- * Parses a raw Figma file JSON into an intermediate tree that retains
- * bounding boxes, auto-layout data, fills, and content for each node.
+ * Parses a raw Figma file JSON into an intermediate tree.
+ *
+ * Node hierarchy is fully preserved:
+ *   FRAME / GROUP / COMPONENT / INSTANCE / COMPONENT_SET → container
+ *   TEXT → heading or text
+ *   RECTANGLE (image fill) → image
+ *   VECTOR / ELLIPSE / STAR / etc. → image (svg export)
+ *   Buttons detected by shape+single-text-child heuristic
+ *
+ * Each container carries:
+ *   layout.is_auto_layout — true when the Figma node has layoutMode set
+ *   opacity                — node-level opacity (0.0–1.0)
  */
 final class Figma_Parser
 {
@@ -112,10 +122,11 @@ final class Figma_Parser
             return $this->parse_svg($node);
         }
 
-        if (in_array($type, ['FRAME', 'GROUP', 'COMPONENT', 'INSTANCE'], true)) {
+        if (in_array($type, ['FRAME', 'GROUP', 'COMPONENT', 'INSTANCE', 'COMPONENT_SET'], true)) {
             return $this->parse_container($node, $is_root);
         }
 
+        // Any remaining node type that has an image fill → treat as image.
         if (has_image_fill($node)) {
             return $this->parse_image($node);
         }
@@ -126,7 +137,9 @@ final class Figma_Parser
 
     private function parse_container(array $node, bool $is_root): ?array
     {
-        if (! $is_root && $this->should_export_as_svg($node)) {
+        // Only export as SVG if the node itself has NO image fill and matches icon heuristics.
+        // Never SVG-export a node that has an image fill — those should become raster images.
+        if (! $is_root && ! has_image_fill($node) && $this->should_export_as_svg($node)) {
             return $this->parse_svg($node);
         }
 
@@ -154,6 +167,7 @@ final class Figma_Parser
             'figma_type'           => as_str($node['type'] ?? ''),
             'name'                 => get_node_name($node),
             'layout'               => extract_auto_layout($node),
+            'opacity'              => extract_opacity($node),
             'background'           => extract_background_color($node),
             'background_image_ref' => extract_background_image_ref($node),
             'background_gradient'  => extract_gradient($node),
@@ -177,18 +191,19 @@ final class Figma_Parser
         $text        = sanitize_textarea_field(as_str($node['characters'] ?? ''));
 
         return [
-            'type'          => $is_heading ? 'heading' : 'text',
-            'figma_id'      => as_str($node['id'] ?? ''),
-            'name'          => get_node_name($node),
-            'content'       => $text,
-            'font_size'     => $font_size,
-            'font_weight'   => $font_weight,
-            'line_height'   => $line_height,
-            'letter_spacing'=> $letter_sp,
-            'text_align'    => $text_align,
-            'font_family'   => is_string($style['fontFamily'] ?? null) ? $style['fontFamily'] : null,
-            'text_color'    => extract_text_color($node),
-            'layout'        => extract_auto_layout($node),
+            'type'           => $is_heading ? 'heading' : 'text',
+            'figma_id'       => as_str($node['id'] ?? ''),
+            'name'           => get_node_name($node),
+            'content'        => $text,
+            'font_size'      => $font_size,
+            'font_weight'    => $font_weight,
+            'line_height'    => $line_height,
+            'letter_spacing' => $letter_sp,
+            'text_align'     => $text_align,
+            'font_family'    => is_string($style['fontFamily'] ?? null) ? $style['fontFamily'] : null,
+            'text_color'     => extract_text_color($node),
+            'opacity'        => extract_opacity($node),
+            'layout'         => extract_auto_layout($node),
         ];
     }
 
@@ -204,6 +219,7 @@ final class Figma_Parser
             'name'          => get_node_name($node),
             'background'    => extract_background_color($node),
             'border_radius' => extract_border_radius($node),
+            'opacity'       => extract_opacity($node),
             'layout'        => extract_auto_layout($node),
         ];
     }
@@ -220,6 +236,7 @@ final class Figma_Parser
             'name'          => get_node_name($node),
             'background'    => extract_background_color($node),
             'border_radius' => extract_border_radius($node),
+            'opacity'       => extract_opacity($node),
             'layout'        => extract_auto_layout($node),
         ];
     }
@@ -231,7 +248,9 @@ final class Figma_Parser
             'figma_id'      => as_str($node['id'] ?? ''),
             'name'          => get_node_name($node),
             'background'    => extract_background_color($node),
+            'background_gradient' => extract_gradient($node),
             'border_radius' => extract_border_radius($node),
+            'opacity'       => extract_opacity($node),
             'layout'        => extract_auto_layout($node),
         ];
     }
@@ -263,6 +282,7 @@ final class Figma_Parser
             'text_color'  => as_str($children[0]['text_color'] ?? ''),
             'font_size'   => $children[0]['font_size'] ?? null,
             'font_weight' => $children[0]['font_weight'] ?? null,
+            'opacity'     => extract_opacity($node),
             'layout'      => $layout,
         ];
     }
@@ -275,15 +295,15 @@ final class Figma_Parser
         $height = (float) ($layout['height'] ?? 0);
         $name   = strtolower($name);
 
-        if ($len < 2 || $len > 36) {
+        if ($len < 2 || $len > 40) {
             return false;
         }
 
-        if (strpos($name, 'button') !== false || strpos($name, 'cta') !== false) {
+        if (strpos($name, 'button') !== false || strpos($name, 'cta') !== false || strpos($name, 'btn') !== false) {
             return true;
         }
 
-        return '' !== $background && $width >= 60 && $width <= 420 && $height >= 24 && $height <= 100;
+        return '' !== $background && $width >= 60 && $width <= 500 && $height >= 24 && $height <= 120;
     }
 
     private function looks_like_icon(array $node): bool
@@ -297,13 +317,22 @@ final class Figma_Parser
             return true;
         }
 
-        return $width > 0 && $height > 0 && $width <= 96 && $height <= 96;
+        return $width > 0 && $height > 0 && $width <= 80 && $height <= 80;
     }
 
+    /**
+     * Returns true only for pure-vector containers (no image fills anywhere in the subtree)
+     * that look like icons or illustrations.
+     */
     private function should_export_as_svg(array $node): bool
     {
         $children = is_array($node['children'] ?? null) ? $node['children'] : [];
         if (empty($children)) {
+            return false;
+        }
+
+        // If the node itself has an image fill, it must NOT become SVG.
+        if (has_image_fill($node)) {
             return false;
         }
 
@@ -313,6 +342,7 @@ final class Figma_Parser
         $height       = (float) ($layout['height'] ?? 0);
         $visual_count = 0;
         $text_count   = 0;
+        $image_count  = 0;
 
         foreach ($children as $child) {
             if (! is_array($child) || ($child['visible'] ?? true) === false) {
@@ -321,12 +351,15 @@ final class Figma_Parser
             $t = as_str($child['type'] ?? '');
             if ('TEXT' === $t) {
                 $text_count++;
-            } elseif (in_array($t, ['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'LINE', 'ELLIPSE', 'POLYGON', 'RECTANGLE'], true) || has_image_fill($child)) {
+            } elseif (has_image_fill($child)) {
+                $image_count++;
+            } elseif (in_array($t, ['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'LINE', 'ELLIPSE', 'POLYGON', 'RECTANGLE'], true)) {
                 $visual_count++;
             }
         }
 
-        if ($visual_count === 0 || $text_count > 0) {
+        // Don't export as SVG if any child has an image fill.
+        if ($image_count > 0 || $text_count > 0 || $visual_count === 0) {
             return false;
         }
 
@@ -334,7 +367,8 @@ final class Figma_Parser
             return true;
         }
 
-        return $width > 0 && $height > 0 && $width <= 160 && $height <= 160;
+        // Only pure-vector small containers qualify.
+        return $width > 0 && $height > 0 && $width <= 120 && $height <= 120;
     }
 
     private function find_node_by_id(array $figma_file, string $node_id): ?array

@@ -7,17 +7,22 @@ if (! defined('ABSPATH')) {
 }
 
 /**
- * Converts an intermediate-tree node (or section slice) into Elementor Atomic JSON.
+ * Converts the intermediate tree into Elementor Atomic JSON.
  *
- * KEY FIXES:
- *  1. Children of flex-row containers get PERCENTAGE widths (not px) so columns render side-by-side.
- *  2. min_height is only applied to:
- *       - The section root container (top-most, is_root=true).
- *       - Childless visual containers (pure shapes / background-image placeholders).
- *     Inner layout wrappers get NO min_height — Elementor sizes them by content.
- *  3. Absolute-positioned elements receive PARENT-RELATIVE offsets.
- *     We pass the parent's absolute canvas position down the call chain.
- *  4. Basic responsive generation: flex-row containers become flex-column on tablet/mobile.
+ * KEY BEHAVIOUR:
+ *
+ * Auto-layout containers (layout.is_auto_layout = true)
+ *   → flex-direction row or column
+ *   → row children get percentage widths
+ *   → only explicitly ABSOLUTE-positioned children use absolute offsets
+ *
+ * Non-auto-layout containers (layout.is_auto_layout = false)
+ *   → ALL children are forced to position:absolute with parent-relative offsets
+ *   → Parent gets min_height equal to the Figma frame height (prevents collapse)
+ *   → Children get explicit pixel width + height
+ *
+ * This matches how Figma itself positions children of plain FRAMEs and GROUPs
+ * that have no layoutMode: every child is placed via its absoluteBoundingBox.
  */
 final class Elementor_Atomic_Builder
 {
@@ -31,9 +36,6 @@ final class Elementor_Atomic_Builder
     // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Build Elementor elements from the full intermediate tree.
-     */
     public function build(array $tree, array $images = [], array $color_map = []): array
     {
         $this->images    = $images;
@@ -44,7 +46,7 @@ final class Elementor_Atomic_Builder
             if (is_array($child)) {
                 $cx = (float) ($child['layout']['x'] ?? 0);
                 $cy = (float) ($child['layout']['y'] ?? 0);
-                $elements[] = $this->node($child, true, 0, $cx, $cy);
+                $elements[] = $this->node($child, true, 0.0, $cx, $cy, false);
             }
         }
 
@@ -65,10 +67,9 @@ final class Elementor_Atomic_Builder
             if (! is_array($child)) {
                 continue;
             }
-            // Pass the child's own absolute position so its children can compute relative offsets.
             $cx = (float) ($child['layout']['x'] ?? 0);
             $cy = (float) ($child['layout']['y'] ?? 0);
-            $elements[] = $this->node($child, true, 0, $cx, $cy);
+            $elements[] = $this->node($child, true, 0.0, $cx, $cy, false);
         }
 
         return $elements;
@@ -79,20 +80,34 @@ final class Elementor_Atomic_Builder
     // -------------------------------------------------------------------------
 
     /**
-     * @param float $parent_width   pixel width of the parent — 0 means "unknown / full width"
-     * @param float $parent_x       absolute canvas X of the parent (for relative-offset calculation)
+     * @param float $parent_width   pixel width of the parent container
+     * @param float $parent_x       absolute canvas X of the parent
      * @param float $parent_y       absolute canvas Y of the parent
+     * @param bool  $force_absolute force this node to be position:absolute even if
+     *                              layoutPositioning is not 'ABSOLUTE'
      */
-    private function node(array $item, bool $is_root, float $parent_width, float $parent_x, float $parent_y): array
-    {
+    private function node(
+        array $item,
+        bool  $is_root,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
         switch ($item['type'] ?? '') {
-            case 'container': return $this->container($item, $is_root, $parent_width, $parent_x, $parent_y);
-            case 'heading':   return $this->heading_widget($item, $parent_width, $parent_x, $parent_y);
-            case 'text':      return $this->text_widget($item, $parent_width, $parent_x, $parent_y);
-            case 'button':    return $this->button_widget($item, $parent_width, $parent_x, $parent_y);
-            case 'image':     return $this->image_node($item, $parent_width, $parent_x, $parent_y);
+            case 'container':
+                return $this->container($item, $is_root, $parent_width, $parent_x, $parent_y, $force_absolute);
+            case 'heading':
+                return $this->heading_widget($item, $parent_width, $parent_x, $parent_y, $force_absolute);
+            case 'text':
+                return $this->text_widget($item, $parent_width, $parent_x, $parent_y, $force_absolute);
+            case 'button':
+                return $this->button_widget($item, $parent_width, $parent_x, $parent_y, $force_absolute);
+            case 'image':
+                return $this->image_node($item, $parent_width, $parent_x, $parent_y, $force_absolute);
             case 'shape':
-            default:          return $this->shape_node($item, $is_root, $parent_width, $parent_x, $parent_y);
+            default:
+                return $this->shape_node($item, $is_root, $parent_width, $parent_x, $parent_y, $force_absolute);
         }
     }
 
@@ -100,35 +115,48 @@ final class Elementor_Atomic_Builder
     // Container
     // -------------------------------------------------------------------------
 
-    private function container(array $item, bool $is_root, float $parent_width, float $parent_x, float $parent_y): array
-    {
-        $layout      = is_array($item['layout'] ?? null) ? $item['layout'] : [];
-        $self_width  = (float) ($layout['width'] ?? 0);
-        $self_height = (float) ($layout['height'] ?? 0);
-        $self_x      = (float) ($layout['x'] ?? 0);
-        $self_y      = (float) ($layout['y'] ?? 0);
-        $direction   = as_str($layout['direction'] ?? '');
-        $is_row      = ('row' === $direction);
+    private function container(
+        array $item,
+        bool  $is_root,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
+        $layout         = is_array($item['layout'] ?? null) ? $item['layout'] : [];
+        $self_width     = (float) ($layout['width']  ?? 0);
+        $self_height    = (float) ($layout['height'] ?? 0);
+        $self_x         = (float) ($layout['x'] ?? 0);
+        $self_y         = (float) ($layout['y'] ?? 0);
+        $is_auto_layout = (bool)  ($layout['is_auto_layout'] ?? false);
+        $direction      = as_str($layout['direction'] ?? '');
+        $is_row         = ('row' === $direction);
 
-        // Children of a flex-row get THIS container's width so they can compute % share.
+        // Children of a non-auto-layout container are all absolutely positioned.
+        // Children of an auto-layout container follow flex rules.
+        $force_children_absolute = ! $is_auto_layout;
+
         $children_el = [];
         foreach (($item['children'] ?? []) as $child) {
-            if (is_array($child)) {
-                $children_el[] = $this->node(
-                    $child,
-                    false,
-                    $is_row ? $self_width : 0,
-                    $self_x,
-                    $self_y
-                );
+            if (! is_array($child)) {
+                continue;
             }
+            $children_el[] = $this->node(
+                $child,
+                false,
+                $is_row ? $self_width : $self_width, // pass self_width always for absolute calc
+                $self_x,
+                $self_y,
+                $force_children_absolute
+            );
         }
 
         $settings = $this->container_settings(
-            $item, $is_root, $parent_width,
-            $self_width, $self_height,
+            $item, $is_root,
+            $parent_width, $self_width, $self_height,
             $self_x, $self_y,
-            $parent_x, $parent_y
+            $parent_x, $parent_y,
+            $force_absolute, $force_children_absolute
         );
 
         return [
@@ -140,10 +168,10 @@ final class Elementor_Atomic_Builder
         ];
     }
 
-    /**
-     * @param float $self_x   this element's absolute canvas X
-     * @param float $self_y   this element's absolute canvas Y
-     */
+    // -------------------------------------------------------------------------
+    // Container settings
+    // -------------------------------------------------------------------------
+
     private function container_settings(
         array $item,
         bool  $is_root,
@@ -153,39 +181,44 @@ final class Elementor_Atomic_Builder
         float $self_x,
         float $self_y,
         float $parent_x,
-        float $parent_y
+        float $parent_y,
+        bool  $force_absolute,
+        bool  $has_absolute_children
     ): array {
-        $layout      = is_array($item['layout'] ?? null) ? $item['layout'] : [];
-        $direction   = as_str($layout['direction'] ?? '');
-        $is_absolute = (as_str($layout['positioning'] ?? '') === 'ABSOLUTE');
-        $has_children = ! empty($item['children']);
+        $layout         = is_array($item['layout'] ?? null) ? $item['layout'] : [];
+        $direction      = as_str($layout['direction'] ?? '');
+        $is_auto_layout = (bool) ($layout['is_auto_layout'] ?? false);
+        $is_explicit_abs = (as_str($layout['positioning'] ?? '') === 'ABSOLUTE');
+        $is_absolute    = $force_absolute || $is_explicit_abs;
+        $has_children   = ! empty($item['children']);
+        $is_row         = ('row' === $direction);
 
         $settings = [
             'content_width'  => 'full',
-            'flex_direction' => ('row' === $direction) ? 'row' : 'column',
+            'flex_direction' => $is_row ? 'row' : 'column',
         ];
 
-        // Flex alignment
-        $justify = map_align(as_str($layout['primary_axis'] ?? ''));
-        if ($justify !== '') {
-            $settings['flex_justify_content'] = $justify;
-        }
-        $align = map_align(as_str($layout['counter_axis'] ?? ''));
-        if ($align !== '') {
-            $settings['flex_align_items'] = $align;
+        // ---- FLEX ALIGNMENT (auto-layout only) ----
+        if ($is_auto_layout) {
+            $justify = map_align(as_str($layout['primary_axis'] ?? ''));
+            if ($justify !== '') {
+                $settings['flex_justify_content'] = $justify;
+            }
+            $align = map_align(as_str($layout['counter_axis'] ?? ''));
+            if ($align !== '') {
+                $settings['flex_align_items'] = $align;
+            }
+            if (! empty($layout['gap'])) {
+                $settings['gap'] = ['unit' => 'px', 'size' => (float) $layout['gap'], 'sizes' => []];
+            }
         }
 
-        // Gap
-        if (! empty($layout['gap'])) {
-            $settings['gap'] = ['unit' => 'px', 'size' => (float) $layout['gap'], 'sizes' => []];
-        }
-
-        // Padding
+        // ---- PADDING ----
         $pad = is_array($layout['padding'] ?? null) ? $layout['padding'] : [];
-        $pt = (float) ($pad['top'] ?? 0);
-        $pr = (float) ($pad['right'] ?? 0);
-        $pb = (float) ($pad['bottom'] ?? 0);
-        $pl = (float) ($pad['left'] ?? 0);
+        $pt  = (float) ($pad['top']    ?? 0);
+        $pr  = (float) ($pad['right']  ?? 0);
+        $pb  = (float) ($pad['bottom'] ?? 0);
+        $pl  = (float) ($pad['left']   ?? 0);
         if ($pt > 0 || $pr > 0 || $pb > 0 || $pl > 0) {
             $settings['padding'] = [
                 'unit'     => 'px',
@@ -198,48 +231,51 @@ final class Elementor_Atomic_Builder
         }
 
         // ---- WIDTH ----
-        if ($is_absolute) {
-            // Absolute elements get pixel width.
-            if ($self_width > 0) {
-                $settings['width'] = ['unit' => 'px', 'size' => $self_width, 'sizes' => []];
+        if ($is_absolute && $self_width > 0) {
+            // Absolutely positioned: always pixel width.
+            $settings['width'] = ['unit' => 'px', 'size' => $self_width, 'sizes' => []];
+        } elseif (! $is_root && ! $is_absolute) {
+            if ($is_auto_layout && $parent_width > 0 && $self_width > 0 && $is_row) {
+                // Flex-row child: percentage width.
+                $pct = max(1.0, min(100.0, round(($self_width / $parent_width) * 100, 2)));
+                $settings['width'] = ['unit' => '%', 'size' => $pct, 'sizes' => []];
             }
-        } elseif (! $is_root && $parent_width > 0 && $self_width > 0) {
-            // Non-root inside flex-row: percentage width.
-            $pct = max(1.0, min(100.0, round(($self_width / $parent_width) * 100, 2)));
-            $settings['width'] = ['unit' => '%', 'size' => $pct, 'sizes' => []];
+            // Non-row / non-auto children default to 100 % (Elementor default).
         }
 
-        // ---- MIN-HEIGHT ----
-        // Only set min_height for:
-        //   a) Section root (top-level container in build_section).
-        //   b) Childless containers (pure visual shapes / backgrounds).
-        // Inner layout wrappers grow with their content — no explicit min_height.
-        if ($is_root && $self_height > 0) {
-            $settings['min_height'] = [
-                'unit'  => 'px',
-                'size'  => $self_height,   // no artificial cap — honour the Figma height
-                'sizes' => [],
-            ];
+        // ---- HEIGHT / MIN_HEIGHT ----
+        if ($is_absolute && $self_height > 0) {
+            // Hard height for absolutely positioned containers.
+            $settings['height'] = ['unit' => 'px', 'size' => $self_height, 'sizes' => []];
+        } elseif ($is_root && $self_height > 0) {
+            // Section root — honour Figma height as min-height.
+            $settings['min_height'] = ['unit' => 'px', 'size' => $self_height, 'sizes' => []];
+        } elseif (! $is_root && $has_absolute_children && $has_children && $self_height > 0) {
+            // Non-auto-layout container with children: ALL children are absolute → parent
+            // would collapse to zero without an explicit min_height.
+            $settings['min_height'] = ['unit' => 'px', 'size' => $self_height, 'sizes' => []];
         } elseif (! $is_root && ! $has_children && $self_height >= 20) {
-            $settings['min_height'] = [
-                'unit'  => 'px',
-                'size'  => min(4000, $self_height),
-                'sizes' => [],
-            ];
+            // Childless visual container (background / shape placeholder).
+            $settings['min_height'] = ['unit' => 'px', 'size' => min(4000, $self_height), 'sizes' => []];
         }
 
         // ---- ABSOLUTE POSITIONING ----
         if ($is_absolute) {
             $settings['_position'] = 'absolute';
-            // Offset = self_absolute - parent_absolute → parent-relative coordinates.
             $rel_x = $self_x - $parent_x;
             $rel_y = $self_y - $parent_y;
-            if (abs($rel_x) > 0.01) {
-                $settings['_offset_x'] = ['unit' => 'px', 'size' => $rel_x, 'sizes' => []];
+            if (abs($rel_x) > 0.5) {
+                $settings['_offset_x'] = ['unit' => 'px', 'size' => round($rel_x, 1), 'sizes' => []];
             }
-            if (abs($rel_y) > 0.01) {
-                $settings['_offset_y'] = ['unit' => 'px', 'size' => $rel_y, 'sizes' => []];
+            if (abs($rel_y) > 0.5) {
+                $settings['_offset_y'] = ['unit' => 'px', 'size' => round($rel_y, 1), 'sizes' => []];
             }
+        }
+
+        // ---- OPACITY ----
+        $opacity = (float) ($item['opacity'] ?? 1.0);
+        if ($opacity < 0.99) {
+            $settings['_opacity'] = ['unit' => 'px', 'size' => round($opacity * 100), 'sizes' => []];
         }
 
         // ---- BACKGROUND ----
@@ -248,9 +284,8 @@ final class Elementor_Atomic_Builder
         // ---- BORDER RADIUS ----
         $this->apply_border_radius_to_container($settings, $item);
 
-        // ---- RESPONSIVE (generate if no explicit tablet/mobile frames) ----
-        if ('row' === $direction) {
-            // Stack columns on tablet and mobile.
+        // ---- RESPONSIVE ----
+        if ($is_auto_layout && $is_row) {
             $settings['flex_direction_tablet'] = 'column';
             $settings['flex_direction_mobile'] = 'column';
         }
@@ -276,20 +311,15 @@ final class Elementor_Atomic_Builder
                     'url' => as_str($img['url'] ?? ''),
                     'id'  => (int) ($img['id'] ?? 0),
                 ];
-                $settings['background_size']     = 'cover';
-                $settings['background_position'] = 'center center';
-                $settings['background_repeat']   = 'no-repeat';
+                $settings['background_size']       = 'cover';
+                $settings['background_position']   = 'center center';
+                $settings['background_repeat']     = 'no-repeat';
                 if ($bg_color !== '') {
                     $settings['background_color'] = $this->resolve_color($bg_color);
                 }
                 return;
             }
-            // Image not available — fall through to solid color.
-            if ($bg_color !== '') {
-                $settings['background_background'] = 'classic';
-                $settings['background_color']      = $this->resolve_color($bg_color);
-                return;
-            }
+            // CDN fetch failed — fall through to solid/gradient.
         }
 
         if ($bg_gradient !== null) {
@@ -298,7 +328,7 @@ final class Elementor_Atomic_Builder
             $settings['background_gradient_type'] = $g;
             $settings['background_color']         = $this->resolve_color(as_str($bg_gradient['color_a'] ?? '#000000'));
             $settings['background_color_stop']    = ['unit' => '%', 'size' => (float) ($bg_gradient['stop_a'] ?? 0), 'sizes' => []];
-            $settings['background_color_b']       = $this->resolve_color(as_str($bg_gradient['color_b'] ?? '#000000'));
+            $settings['background_color_b']       = $this->resolve_color(as_str($bg_gradient['color_b'] ?? '#ffffff'));
             $settings['background_color_b_stop']  = ['unit' => '%', 'size' => (float) ($bg_gradient['stop_b'] ?? 100), 'sizes' => []];
             if ('linear' === $g) {
                 $settings['background_gradient_angle'] = ['unit' => 'deg', 'size' => (int) ($bg_gradient['angle'] ?? 180), 'sizes' => []];
@@ -318,10 +348,10 @@ final class Elementor_Atomic_Builder
         if (! $br) {
             return;
         }
-        $tl = (float) ($br['tl'] ?? 0);
-        $tr = (float) ($br['tr'] ?? 0);
+        $tl  = (float) ($br['tl'] ?? 0);
+        $tr  = (float) ($br['tr'] ?? 0);
         $brv = (float) ($br['br'] ?? 0);
-        $bl = (float) ($br['bl'] ?? 0);
+        $bl  = (float) ($br['bl'] ?? 0);
 
         $settings['border_radius'] = [
             'unit'     => 'px',
@@ -337,8 +367,13 @@ final class Elementor_Atomic_Builder
     // Widgets
     // -------------------------------------------------------------------------
 
-    private function heading_widget(array $item, float $parent_width, float $parent_x, float $parent_y): array
-    {
+    private function heading_widget(
+        array $item,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
         $settings = [
             'title'       => esc_html(as_str($item['content'] ?? '')),
             'header_size' => $this->choose_heading_tag($item),
@@ -346,27 +381,37 @@ final class Elementor_Atomic_Builder
         ];
         $this->apply_typography($settings, $item);
         $this->apply_text_color($settings, $item);
-        $this->apply_widget_width($settings, $item, $parent_width);
-        $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y);
-
+        $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
+        $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
+        $this->apply_widget_opacity($settings, $item);
         return $this->widget('heading', $settings);
     }
 
-    private function text_widget(array $item, float $parent_width, float $parent_x, float $parent_y): array
-    {
+    private function text_widget(
+        array $item,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
         $settings = [
             'editor' => wp_kses_post(nl2br(as_str($item['content'] ?? ''))),
         ];
         $this->apply_typography($settings, $item);
         $this->apply_text_color($settings, $item);
-        $this->apply_widget_width($settings, $item, $parent_width);
-        $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y);
-
+        $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
+        $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
+        $this->apply_widget_opacity($settings, $item);
         return $this->widget('text-editor', $settings);
     }
 
-    private function button_widget(array $item, float $parent_width, float $parent_x, float $parent_y): array
-    {
+    private function button_widget(
+        array $item,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
         $settings = [
             'text' => esc_html(as_str($item['content'] ?? __('Button', 'ftea'))),
             'link' => ['url' => '#'],
@@ -376,52 +421,64 @@ final class Elementor_Atomic_Builder
         }
         $this->apply_typography($settings, $item);
         $this->apply_text_color($settings, $item);
-        $this->apply_widget_width($settings, $item, $parent_width);
-        $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y);
-
+        $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
+        $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
+        $this->apply_widget_opacity($settings, $item);
         return $this->widget('button', $settings);
     }
 
-    private function image_node(array $item, float $parent_width, float $parent_x, float $parent_y): array
-    {
+    private function image_node(
+        array $item,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
         $figma_id = as_str($item['figma_id'] ?? '');
         $image    = ($figma_id && isset($this->images[$figma_id]))
             ? $this->images[$figma_id]
             : ['id' => 0, 'url' => '', 'inline_svg' => ''];
 
-        // SVG inline → html widget
+        // SVG inline → html widget.
         if (! empty($image['inline_svg'])) {
             $settings = ['html' => $image['inline_svg']];
             $this->apply_widget_border_radius($settings, $item);
-            $this->apply_widget_width($settings, $item, $parent_width);
-            $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y);
+            $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
+            $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
+            $this->apply_widget_opacity($settings, $item);
             return $this->widget('html', $settings);
         }
 
-        // Raster image → image widget
-        if (! empty($image['url']) || ! empty($image['id'])) {
+        // Raster image → image widget.
+        if (! empty($image['url']) || $image['id'] > 0) {
             $settings = [
                 'image'          => ['url' => as_str($image['url'] ?? ''), 'id' => (int) ($image['id'] ?? 0)],
                 'image_size'     => 'full',
                 'caption_source' => 'none',
             ];
             $this->apply_widget_border_radius($settings, $item);
-            $this->apply_widget_width($settings, $item, $parent_width);
-            $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y);
+            $this->apply_widget_size($settings, $item, $parent_width, $force_absolute);
+            $this->apply_widget_absolute($settings, $item, $parent_x, $parent_y, $force_absolute);
+            $this->apply_widget_opacity($settings, $item);
             return $this->widget('image', $settings);
         }
 
-        // Fallback: a visible placeholder container so the slot isn't invisible.
-        return $this->image_fallback($item, $parent_width, $parent_x, $parent_y);
+        // Fallback placeholder container.
+        return $this->image_fallback($item, $parent_width, $parent_x, $parent_y, $force_absolute);
     }
 
-    private function image_fallback(array $item, float $parent_width, float $parent_x, float $parent_y): array
-    {
-        $layout     = is_array($item['layout'] ?? null) ? $item['layout'] : [];
-        $self_width = (float) ($layout['width'] ?? 0);
-        $self_height= (float) ($layout['height'] ?? 0);
-        $self_x     = (float) ($layout['x'] ?? 0);
-        $self_y     = (float) ($layout['y'] ?? 0);
+    private function image_fallback(
+        array $item,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
+        $layout      = is_array($item['layout'] ?? null) ? $item['layout'] : [];
+        $self_width  = (float) ($layout['width']  ?? 0);
+        $self_height = (float) ($layout['height'] ?? 0);
+        $self_x      = (float) ($layout['x'] ?? 0);
+        $self_y      = (float) ($layout['y'] ?? 0);
 
         $settings = [
             'content_width'         => 'full',
@@ -430,64 +487,95 @@ final class Elementor_Atomic_Builder
             'background_color'      => '#e8e8e8',
         ];
 
-        if ($parent_width > 0 && $self_width > 0) {
+        $is_abs = $force_absolute || (as_str($layout['positioning'] ?? '') === 'ABSOLUTE');
+
+        if ($is_abs && $self_width > 0) {
+            $settings['width'] = ['unit' => 'px', 'size' => $self_width, 'sizes' => []];
+        } elseif (! $is_abs && $parent_width > 0 && $self_width > 0) {
             $pct = max(1.0, min(100.0, round(($self_width / $parent_width) * 100, 2)));
             $settings['width'] = ['unit' => '%', 'size' => $pct, 'sizes' => []];
         }
-        if ($self_height >= 20) {
+
+        if ($is_abs && $self_height > 0) {
+            $settings['height'] = ['unit' => 'px', 'size' => $self_height, 'sizes' => []];
+        } elseif ($self_height >= 20) {
             $settings['min_height'] = ['unit' => 'px', 'size' => min(4000, $self_height), 'sizes' => []];
         }
 
         $this->apply_border_radius_to_container($settings, $item);
 
-        if (as_str($item['layout']['positioning'] ?? '') === 'ABSOLUTE') {
+        if ($is_abs) {
             $settings['_position'] = 'absolute';
             $rel_x = $self_x - $parent_x;
             $rel_y = $self_y - $parent_y;
-            if (abs($rel_x) > 0.01) {
-                $settings['_offset_x'] = ['unit' => 'px', 'size' => $rel_x, 'sizes' => []];
+            if (abs($rel_x) > 0.5) {
+                $settings['_offset_x'] = ['unit' => 'px', 'size' => round($rel_x, 1), 'sizes' => []];
             }
-            if (abs($rel_y) > 0.01) {
-                $settings['_offset_y'] = ['unit' => 'px', 'size' => $rel_y, 'sizes' => []];
+            if (abs($rel_y) > 0.5) {
+                $settings['_offset_y'] = ['unit' => 'px', 'size' => round($rel_y, 1), 'sizes' => []];
             }
         }
 
         return ['id' => make_id(), 'elType' => 'container', 'settings' => $settings, 'elements' => [], 'isInner' => true];
     }
 
-    private function shape_node(array $item, bool $is_root, float $parent_width, float $parent_x, float $parent_y): array
-    {
-        $layout     = is_array($item['layout'] ?? null) ? $item['layout'] : [];
-        $self_width = (float) ($layout['width'] ?? 0);
-        $self_height= (float) ($layout['height'] ?? 0);
-        $self_x     = (float) ($layout['x'] ?? 0);
-        $self_y     = (float) ($layout['y'] ?? 0);
+    private function shape_node(
+        array $item,
+        bool  $is_root,
+        float $parent_width,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): array {
+        $layout      = is_array($item['layout'] ?? null) ? $item['layout'] : [];
+        $self_width  = (float) ($layout['width']  ?? 0);
+        $self_height = (float) ($layout['height'] ?? 0);
+        $self_x      = (float) ($layout['x'] ?? 0);
+        $self_y      = (float) ($layout['y'] ?? 0);
 
         $settings = ['content_width' => 'full', 'flex_direction' => 'column'];
         $this->apply_background($settings, $item);
         $this->apply_border_radius_to_container($settings, $item);
 
-        if (! $is_root && $parent_width > 0 && $self_width > 0) {
+        $is_abs = $force_absolute || (as_str($layout['positioning'] ?? '') === 'ABSOLUTE');
+
+        if ($is_abs && $self_width > 0) {
+            $settings['width'] = ['unit' => 'px', 'size' => $self_width, 'sizes' => []];
+        } elseif (! $is_root && ! $is_abs && $parent_width > 0 && $self_width > 0) {
             $pct = max(1.0, min(100.0, round(($self_width / $parent_width) * 100, 2)));
             $settings['width'] = ['unit' => '%', 'size' => $pct, 'sizes' => []];
         }
-        if ($self_height >= 20) {
+
+        if ($is_abs && $self_height > 0) {
+            $settings['height'] = ['unit' => 'px', 'size' => $self_height, 'sizes' => []];
+        } elseif ($self_height >= 20) {
             $settings['min_height'] = ['unit' => 'px', 'size' => min(4000, $self_height), 'sizes' => []];
         }
 
-        if (as_str($layout['positioning'] ?? '') === 'ABSOLUTE') {
+        if ($is_abs) {
             $settings['_position'] = 'absolute';
             $rel_x = $self_x - $parent_x;
             $rel_y = $self_y - $parent_y;
-            if (abs($rel_x) > 0.01) {
-                $settings['_offset_x'] = ['unit' => 'px', 'size' => $rel_x, 'sizes' => []];
+            if (abs($rel_x) > 0.5) {
+                $settings['_offset_x'] = ['unit' => 'px', 'size' => round($rel_x, 1), 'sizes' => []];
             }
-            if (abs($rel_y) > 0.01) {
-                $settings['_offset_y'] = ['unit' => 'px', 'size' => $rel_y, 'sizes' => []];
+            if (abs($rel_y) > 0.5) {
+                $settings['_offset_y'] = ['unit' => 'px', 'size' => round($rel_y, 1), 'sizes' => []];
             }
         }
 
-        return ['id' => make_id(), 'elType' => 'container', 'settings' => $settings, 'elements' => [], 'isInner' => ! $is_root];
+        $opacity = (float) ($item['opacity'] ?? 1.0);
+        if ($opacity < 0.99) {
+            $settings['_opacity'] = ['unit' => 'px', 'size' => round($opacity * 100), 'sizes' => []];
+        }
+
+        return [
+            'id'       => make_id(),
+            'elType'   => 'container',
+            'settings' => $settings,
+            'elements' => [],
+            'isInner'  => ! $is_root,
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -506,7 +594,7 @@ final class Elementor_Atomic_Builder
     }
 
     // -------------------------------------------------------------------------
-    // Typography / color / layout helpers
+    // Shared widget helpers
     // -------------------------------------------------------------------------
 
     private function apply_typography(array &$settings, array $item): void
@@ -552,41 +640,63 @@ final class Elementor_Atomic_Builder
     }
 
     /**
-     * Set the widget's inline width when it lives inside a flex-row parent.
+     * Sets the widget's inline width.
+     * - force_absolute: pixel width
+     * - flex-row parent (parent_width > 0): percentage
      */
-    private function apply_widget_width(array &$settings, array $item, float $parent_width): void
+    private function apply_widget_size(array &$settings, array $item, float $parent_width, bool $force_absolute): void
     {
-        if ($parent_width <= 0) {
+        $w = (float) ($item['layout']['width']  ?? 0);
+        $h = (float) ($item['layout']['height'] ?? 0);
+
+        if ($force_absolute) {
+            if ($w > 0) {
+                $settings['_element_width']        = 'initial';
+                $settings['_element_custom_width'] = ['unit' => 'px', 'size' => $w, 'sizes' => []];
+            }
+            // Height is communicated via the widget wrapper when needed;
+            // most Elementor widgets auto-size vertically, so we skip explicit height here.
             return;
         }
-        $w = (float) ($item['layout']['width'] ?? 0);
-        if ($w <= 0) {
-            return;
+
+        if ($parent_width > 0 && $w > 0) {
+            $pct = max(1.0, min(100.0, round(($w / $parent_width) * 100, 2)));
+            $settings['_element_width']        = 'initial';
+            $settings['_element_custom_width'] = ['unit' => '%', 'size' => $pct, 'sizes' => []];
         }
-        $pct = max(1.0, min(100.0, round(($w / $parent_width) * 100, 2)));
-        $settings['_element_width']        = 'initial';
-        $settings['_element_custom_width'] = ['unit' => '%', 'size' => $pct, 'sizes' => []];
     }
 
-    /**
-     * Apply absolute positioning to a widget (Advanced tab).
-     */
-    private function apply_widget_absolute(array &$settings, array $item, float $parent_x, float $parent_y): void
-    {
-        if (as_str($item['layout']['positioning'] ?? '') !== 'ABSOLUTE') {
+    private function apply_widget_absolute(
+        array &$settings,
+        array $item,
+        float $parent_x,
+        float $parent_y,
+        bool  $force_absolute
+    ): void {
+        $is_explicit = (as_str($item['layout']['positioning'] ?? '') === 'ABSOLUTE');
+        if (! $force_absolute && ! $is_explicit) {
             return;
         }
+
         $self_x = (float) ($item['layout']['x'] ?? 0);
         $self_y = (float) ($item['layout']['y'] ?? 0);
         $rel_x  = $self_x - $parent_x;
         $rel_y  = $self_y - $parent_y;
 
         $settings['_position'] = 'absolute';
-        if (abs($rel_x) > 0.01) {
-            $settings['_offset_x'] = ['unit' => 'px', 'size' => $rel_x, 'sizes' => []];
+        if (abs($rel_x) > 0.5) {
+            $settings['_offset_x'] = ['unit' => 'px', 'size' => round($rel_x, 1), 'sizes' => []];
         }
-        if (abs($rel_y) > 0.01) {
-            $settings['_offset_y'] = ['unit' => 'px', 'size' => $rel_y, 'sizes' => []];
+        if (abs($rel_y) > 0.5) {
+            $settings['_offset_y'] = ['unit' => 'px', 'size' => round($rel_y, 1), 'sizes' => []];
+        }
+    }
+
+    private function apply_widget_opacity(array &$settings, array $item): void
+    {
+        $opacity = (float) ($item['opacity'] ?? 1.0);
+        if ($opacity < 0.99) {
+            $settings['_opacity'] = ['unit' => 'px', 'size' => round($opacity * 100), 'sizes' => []];
         }
     }
 
