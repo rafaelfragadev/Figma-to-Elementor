@@ -29,6 +29,28 @@ final class Figma_API
     }
 
     /**
+     * Export a single frame as PNG and return its CDN URL.
+     *
+     * Used by the visual-first pipeline to obtain a screenshot for
+     * section-break analysis. Requesting at scale=0.5 keeps download
+     * size manageable while retaining enough resolution for pixel sampling.
+     *
+     * @return array{url:string}|\WP_Error
+     */
+    public function export_frame_png(string $file_key, string $frame_id, string $token, float $scale = 0.5): array|\WP_Error
+    {
+        $result = $this->get_image_urls($file_key, $token, [$frame_id], 'png', $scale);
+        if (is_wp_error($result)) {
+            return $result;
+        }
+        $url = as_str($result['images'][$frame_id] ?? '');
+        if ($url === '') {
+            return new \WP_Error('ftea_no_screenshot', 'Figma did not return a screenshot URL for the selected frame.');
+        }
+        return ['url' => $url];
+    }
+
+    /**
      * Resolve imageRef hashes → CDN URLs.
      * Endpoint: GET /v1/files/:key/images
      * Response: {"error":false,"meta":{"images":{"ref":"url",...}}}

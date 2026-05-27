@@ -13,30 +13,36 @@ final class Admin_Page
     private const OPTION_FILE  = 'ftea_figma_file_key';
     private const SESSION_KEY  = 'ftea_session';
 
-    private Figma_API               $api;
-    private Figma_Parser            $parser;
-    private Section_Detector        $section_detector;
-    private Design_Token_Extractor  $token_extractor;
-    private Asset_Importer          $asset_importer;
+    private Figma_API                $api;
+    private Figma_Parser             $parser;
+    private Section_Detector         $section_detector;
+    private Visual_Section_Detector  $visual_detector;
+    private Node_Visual_Mapper       $node_mapper;
+    private Design_Token_Extractor   $token_extractor;
+    private Asset_Importer           $asset_importer;
     private Elementor_Atomic_Builder $builder;
-    private Responsive_Mapper       $responsive;
-    private Import_Logger           $logger;
-    private Template_Exporter       $exporter;
+    private Responsive_Mapper        $responsive;
+    private Import_Logger            $logger;
+    private Template_Exporter        $exporter;
 
     public function __construct(
-        Figma_API $api,
-        Figma_Parser $parser,
-        Section_Detector $section_detector,
-        Design_Token_Extractor $token_extractor,
-        Asset_Importer $asset_importer,
+        Figma_API               $api,
+        Figma_Parser            $parser,
+        Section_Detector        $section_detector,
+        Visual_Section_Detector $visual_detector,
+        Node_Visual_Mapper      $node_mapper,
+        Design_Token_Extractor  $token_extractor,
+        Asset_Importer          $asset_importer,
         Elementor_Atomic_Builder $builder,
-        Responsive_Mapper $responsive,
-        Import_Logger $logger,
-        Template_Exporter $exporter
+        Responsive_Mapper       $responsive,
+        Import_Logger           $logger,
+        Template_Exporter       $exporter
     ) {
         $this->api              = $api;
         $this->parser           = $parser;
         $this->section_detector = $section_detector;
+        $this->visual_detector  = $visual_detector;
+        $this->node_mapper      = $node_mapper;
         $this->token_extractor  = $token_extractor;
         $this->asset_importer   = $asset_importer;
         $this->builder          = $builder;
@@ -166,17 +172,27 @@ final class Admin_Page
 
     private function render_step_sections(): void
     {
-        $session    = $this->get_session();
-        $sections   = $session['sections'] ?? [];
-        $frame_name = esc_html($session['frame_name'] ?? '');
-        $page_id    = (int) ($session['page_id'] ?? 0);
-        $imported   = is_array($session['imported_sections'] ?? null) ? $session['imported_sections'] : [];
-        $log_map    = $this->build_log_map($session['log_entries'] ?? []);
+        $session          = $this->get_session();
+        $sections         = $session['sections'] ?? [];
+        $frame_name       = esc_html($session['frame_name'] ?? '');
+        $page_id          = (int) ($session['page_id'] ?? 0);
+        $imported         = is_array($session['imported_sections'] ?? null) ? $session['imported_sections'] : [];
+        $log_map          = $this->build_log_map($session['log_entries'] ?? []);
+        $debug_log        = is_array($session['section_debug_log'] ?? null) ? $session['section_debug_log'] : [];
+        $has_warning      = (bool) ($session['section_warning'] ?? false);
+        $detection_source = as_str($session['detection_source'] ?? 'hierarchy');
         ?>
         <div class="ftea-card">
             <h2><?php printf(esc_html__('Import Sections — %s', 'ftea'), $frame_name); ?></h2>
-            <p><?php printf(esc_html__('%d section(s) detected. Import one at a time to validate each section before advancing.', 'ftea'), count($sections)); ?></p>
-            <?php $this->render_debug_panel($sections); ?>
+            <p>
+                <?php printf(esc_html__('%d section(s) detected.', 'ftea'), count($sections)); ?>
+                <?php if ('visual' === $detection_source) : ?>
+                    <span class="ftea-badge ftea-badge-done" style="vertical-align:middle"><?php esc_html_e('Visual Detection', 'ftea'); ?></span>
+                <?php else : ?>
+                    <span class="ftea-badge ftea-badge-pending" style="vertical-align:middle"><?php esc_html_e('Hierarchy Fallback', 'ftea'); ?></span>
+                <?php endif; ?>
+            </p>
+            <?php $this->render_debug_panel($sections, $debug_log, $has_warning); ?>
 
             <?php if ($page_id > 0) : ?>
                 <p>
@@ -501,8 +517,19 @@ final class Admin_Page
             return;
         }
 
-        $sections   = $this->section_detector->detect($tree);
-        $frame_name = $tree['name'] ?? $frame_id;
+        $frame_name  = as_str($tree['name'] ?? $frame_id);
+        $token       = as_str(get_option(self::OPTION_TOKEN, ''));
+        $file_key    = as_str(get_option(self::OPTION_FILE, ''));
+
+        // ── 1. Visual-first detection ──────────────────────────────────────
+        $sections    = $this->try_visual_detection($tree, $frame_id, $token, $file_key);
+        $used_visual = ! empty($sections);
+
+        // ── 2. Figma-hierarchy fallback ────────────────────────────────────
+        if (! $used_visual) {
+            ftea_log('Visual detection skipped or failed — falling back to hierarchy detection');
+            $sections = $this->section_detector->detect($tree);
+        }
 
         if (empty($sections)) {
             $this->redirect_with_notice('frames', 'error', __('No sections could be detected in this frame.', 'ftea'));
@@ -510,6 +537,10 @@ final class Admin_Page
         }
 
         $page_id = $this->create_elementor_draft($frame_name);
+
+        // Collect fallback log from hierarchy detector (empty when visual succeeded)
+        $debug_log   = $used_visual ? [] : $this->section_detector->get_last_log();
+        $has_warning = $used_visual ? false : $this->section_detector->has_section_warning();
 
         $session['step']              = 'sections';
         $session['frame_id']          = $frame_id;
@@ -521,9 +552,87 @@ final class Admin_Page
         $session['all_elements']      = [];
         $session['asset_cache']       = [];
         $session['log_entries']       = [];
+        $session['section_debug_log'] = $debug_log;
+        $session['section_warning']   = $has_warning;
+        $session['detection_source']  = $used_visual ? 'visual' : 'hierarchy';
 
         $this->save_session($session);
         $this->redirect_to_step('sections');
+    }
+
+    /**
+     * Attempt visual-first section detection.
+     *
+     * 1. Export the frame as a half-resolution PNG via Figma API.
+     * 2. Run pixel-level analysis to find section boundaries.
+     * 3. Map every direct child of the root frame to its visual section by
+     *    absolute Y midpoint — no Figma parent hierarchy is used.
+     *
+     * Returns [] on any failure so the caller can fall back to hierarchy detection.
+     */
+    private function try_visual_detection(
+        array  $tree,
+        string $frame_id,
+        string $token,
+        string $file_key
+    ): array {
+        if (! extension_loaded('gd')) {
+            ftea_log('Visual detection: GD extension not available');
+            return [];
+        }
+
+        $frame_node = $tree['children'][0] ?? null;
+        if (! is_array($frame_node)) {
+            return [];
+        }
+
+        $layout  = is_array($frame_node['layout'] ?? null) ? $frame_node['layout'] : [];
+        $frame_x = (float) ($layout['x']      ?? 0);
+        $frame_y = (float) ($layout['y']      ?? 0);
+        $frame_w = (float) ($layout['width']  ?? 0);
+        $frame_h = (float) ($layout['height'] ?? 0);
+
+        if ($frame_w < 10 || $frame_h < 10) {
+            return [];
+        }
+
+        // Export frame PNG at scale=0.5 (sufficient for band analysis)
+        $png_result = $this->api->export_frame_png($file_key, $frame_id, $token, 0.5);
+        if (is_wp_error($png_result)) {
+            ftea_log('Visual detection: Figma PNG export failed', ['msg' => $png_result->get_error_message()]);
+            return [];
+        }
+
+        $png_url = as_str($png_result['url'] ?? '');
+        if (empty($png_url)) {
+            return [];
+        }
+
+        // Download the PNG
+        $dl = wp_remote_get($png_url, ['timeout' => 90]);
+        if (is_wp_error($dl) || wp_remote_retrieve_response_code($dl) !== 200) {
+            ftea_log('Visual detection: PNG download failed');
+            return [];
+        }
+
+        $png_data = wp_remote_retrieve_body($dl);
+        if (empty($png_data)) {
+            return [];
+        }
+
+        // Detect visual section boundaries from pixels
+        $visual_sections = $this->visual_detector->detect($png_data, $frame_h, $frame_y, $frame_x);
+        if (empty($visual_sections)) {
+            ftea_log('Visual detection: no sections found in screenshot');
+            return [];
+        }
+
+        ftea_log('Visual detection: found ' . count($visual_sections) . ' section(s)');
+
+        // Map first-level Figma nodes to sections by absolute Y
+        $first_level = is_array($frame_node['children'] ?? null) ? $frame_node['children'] : [];
+
+        return $this->node_mapper->build_sections($first_level, $visual_sections, $frame_x, $frame_w);
     }
 
     private function do_import_one_section(int $index): void
@@ -775,7 +884,7 @@ final class Admin_Page
     // Debug panel (Phase 7)
     // -------------------------------------------------------------------------
 
-    private function render_debug_panel(array $sections): void
+    private function render_debug_panel(array $sections, array $debug_log = [], bool $has_warning = false): void
     {
         if (empty($sections)) {
             return;
@@ -809,6 +918,13 @@ final class Admin_Page
             }
         }
         ?>
+        <?php if ($has_warning) : ?>
+        <div class="notice notice-warning inline" style="margin-top:12px">
+            <p><strong><?php esc_html_e('Warning:', 'ftea'); ?></strong>
+            <?php esc_html_e('More than 6 sections were detected — internal elements may have been classified as sections. Check the debug panel below.', 'ftea'); ?></p>
+        </div>
+        <?php endif; ?>
+
         <details class="ftea-debug-panel">
             <summary><?php esc_html_e('Debug Panel — Section Analysis', 'ftea'); ?></summary>
 
@@ -901,6 +1017,54 @@ final class Admin_Page
                     <?php endforeach; ?>
                 </tbody>
             </table>
+
+            <?php if (! empty($debug_log)) : ?>
+            <details style="margin-top:12px">
+                <summary style="cursor:pointer;font-weight:600;color:#1d2d62;font-size:0.9em">
+                    <?php printf(esc_html__('Node Classification Log (%d nodes)', 'ftea'), count($debug_log)); ?>
+                </summary>
+                <table class="wp-list-table widefat striped ftea-debug-table" style="margin-top:8px;font-size:12px">
+                    <thead>
+                        <tr>
+                            <th><?php esc_html_e('Node Name', 'ftea'); ?></th>
+                            <th><?php esc_html_e('Type', 'ftea'); ?></th>
+                            <th><?php esc_html_e('Role', 'ftea'); ?></th>
+                            <th><?php esc_html_e('Score', 'ftea'); ?></th>
+                            <th><?php esc_html_e('Criteria Met', 'ftea'); ?></th>
+                            <th><?php esc_html_e('Disqualified Reason', 'ftea'); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($debug_log as $entry) :
+                            $role     = as_str($entry['role']        ?? 'element');
+                            $score    = (int) ($entry['score']       ?? 0);
+                            $reasons  = is_array($entry['reasons']   ?? null) ? $entry['reasons'] : [];
+                            $disq     = as_str($entry['disq_reason'] ?? '');
+                            $f_type   = as_str($entry['node']['figma_type'] ?? $entry['node']['type'] ?? '—');
+                            $name     = as_str($entry['node']['name'] ?? '?');
+                            $role_cls = [
+                                'main_section'    => 'ftea-badge-done',
+                                'background_layer'=> 'ftea-badge-error',
+                                'card'            => 'ftea-badge-pending',
+                                'decorative'      => '',
+                                'content_group'   => '',
+                                'element'         => '',
+                            ][$role] ?? '';
+                        ?>
+                            <tr>
+                                <td><?php echo esc_html($name); ?></td>
+                                <td><code><?php echo esc_html($f_type); ?></code></td>
+                                <td><span class="ftea-badge <?php echo esc_attr($role_cls); ?>"><?php echo esc_html($role); ?></span></td>
+                                <td><?php echo $score; ?>/7</td>
+                                <td class="ftea-meta" style="font-size:11px"><?php echo esc_html(implode(', ', $reasons) ?: '—'); ?></td>
+                                <td class="ftea-meta" style="color:#842029;font-size:11px"><?php echo esc_html($disq ?: '—'); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </details>
+            <?php endif; ?>
+
         </details>
         <?php
     }

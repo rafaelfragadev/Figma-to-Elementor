@@ -3,7 +3,7 @@
  * Plugin Name: Figma to Elementor Atomic
  * Plugin URI: https://example.com/figma-to-elementor-atomic
  * Description: Converts Figma layouts to Elementor pages using atomic elements with section-by-section processing and design tokens.
- * Version: 1.3.0
+ * Version: 2.0.0
  * Author: MVP
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -16,7 +16,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('FTEA_VERSION', '1.3.0');
+define('FTEA_VERSION', '2.0.0');
 define('FTEA_PLUGIN_FILE', __FILE__);
 define('FTEA_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FTEA_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -30,6 +30,8 @@ require_once FTEA_PLUGIN_DIR . 'includes/helpers.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-figma-api.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-figma-parser.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-section-detector.php';
+require_once FTEA_PLUGIN_DIR . 'includes/class-visual-section-detector.php';
+require_once FTEA_PLUGIN_DIR . 'includes/class-node-visual-mapper.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-design-token-extractor.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-asset-importer.php';
 require_once FTEA_PLUGIN_DIR . 'includes/class-elementor-atomic-builder.php';
@@ -58,6 +60,8 @@ function ftea_make_admin_page(): Admin_Page
             new Figma_API(),
             new Figma_Parser(),
             new Section_Detector(),
+            new Visual_Section_Detector(),
+            new Node_Visual_Mapper(),
             new Design_Token_Extractor(),
             new Asset_Importer(),
             new Elementor_Atomic_Builder(),
